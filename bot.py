@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import logging
 import os
 import re
@@ -23,6 +24,7 @@ from database import (
     create_lead,
     create_support_request,
     ensure_user,
+    get_latest_payment_lead,
     get_referral_count,
     get_support_request,
     get_user,
@@ -37,6 +39,29 @@ logging.basicConfig(level=logging.INFO)
 
 
 user_sessions: dict[int, dict[str, Any]] = {}
+_INSTANCE_LOCK_FD: int | None = None
+_INSTANCE_LOCK_PATH = Path(".bot.instance.lock")
+
+
+def _fix_mojibake(value: str) -> str:
+    if not any(marker in value for marker in ("Ð", "Ñ", "ð", "â", "Ò", "Ó")):
+        return value
+    try:
+        return value.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return value
+
+
+def _normalize_strings(value: Any) -> Any:
+    if isinstance(value, str):
+        return _fix_mojibake(value)
+    if isinstance(value, dict):
+        return {key: _normalize_strings(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_strings(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_normalize_strings(item) for item in value)
+    return value
 
 TEXTS = {
     "uz": {
@@ -87,24 +112,28 @@ TEXTS = {
         "change_language": "🌐 Тилни алмаштириш",
         "go_payment": "💳 Тўловга ўтиш",
         "payment_title": (
-            "💳 <b>Тўлов усулини танланг</b>\n"
-            "━━━━━━━━━━━━━━\n\n"
-            "Қуйидаги тўлов тизимларидан бирини танланг."
+            "💰 <b>To'lov uchun ma'lumotlar:</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "💳 <b>Karta raqam:</b> <code>4073420063643757</code>\n"
+            "👤 <b>Egasi:</b> Hasanov B\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "☑️ Kerakli summani yuboring va <b>« To'lov qildim »</b> tugmasini bosing."
         ),
-        "payment_selected": "Тўлов усули танланди.",
-        "payment_saved_note": "Карта реквизитлари чиқарилди. Энди квитанцияни юкланг.",
+        "payment_selected": "Тўлов қилиш босқичига ўтилди.",
+        "payment_saved_note": "Тўлов маълумотлари чиқарилди.",
         "payment_details": (
-            "💳 <b>{payment_method}</b>\n"
-            "━━━━━━━━━━━━━━\n\n"
-            "Барча тўлов тизимлари учун бир хил карта ишлатилади:\n\n"
-            "💳 <b>Карта рақами:</b>\n<code>4073420063643757</code>\n\n"
-            "👤 <b>Эгаси:</b>\nHasanov B"
+            "💰 <b>To'lov uchun ma'lumotlar:</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "💳 <b>Karta raqam:</b> <code>4073420063643757</code>\n"
+            "👤 <b>Egasi:</b> Hasanov B\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "☑️ Kerakli summani yuboring va <b>« To'lov qildim »</b> tugmasini bosing."
         ),
-        "upload_receipt_button": "📎 Квитанцияни юклаш",
-        "payment_receipt_prompt": "📎 Шу ерда квитанцияни юкланг.",
-        "payment_receipt_uploaded": "Тўловингиз текшириш учун админга юборилди. Жавобини кутинг.",
-        "payment_receipt_invalid": "Квитанцияни расм ёки файл кўринишида юборинг.",
-        "payment_receipt_pending": "Аввал тўлов усулини танланг, кейин квитанцияни юкланг.",
+        "payment_done_button": "✅ To'lov qildim",
+        "payment_receipt_prompt": "📎 Квитанцияни юкланг.\n\nPDF, расм ёки файл кўринишида юборинг.",
+        "payment_receipt_uploaded": "✅ Тўлов қабул қилинди. Админ томонидан текширилади. Илтимос, кутинг.",
+        "payment_receipt_invalid": "Квитанцияни PDF, расм ёки файл кўринишида юборинг.",
+        "payment_receipt_pending": "Аввал тўлов қилинг ва « To'lov qildim » тугмасини босинг.",
         "prompt_nationality": (
             "🪪 <b>1/8 Фуқаролигингизни танланг</b>\n\n"
             "Қуйидаги давлатлардан бирини танланг:"
@@ -127,24 +156,28 @@ TEXTS = {
             "🌾 <b>5/8 Тажриба</b>\n\n"
             "Қишлоқ хўжалигида тажрибангиз борми?"
         ),
+        "prompt_uk_experience": (
+            "🇬🇧 <b>6/9 Англияда мавсумий иш тажрибаси</b>\n\n"
+            "Аввал Англияда мавсумий ишда ишлаганмисиз?"
+        ),
         "yes": "✅ Ҳа",
         "no": "❌ Йўқ",
         "prompt_phone_primary": (
-            "📱 <b>6/8 Асосий телефон рақам</b>\n\n"
+            "📱 <b>7/9 Асосий телефон рақам</b>\n\n"
             "Асосий телефон рақамингизни киритинг.\n\n"
             "<i>Масалан: +998901234567</i>"
         ),
         "prompt_phone_secondary": (
-            "☎️ <b>6/8 Қўшимча телефон рақам</b>\n\n"
-            "Иккинчи телефон рақамингизни киритинг ёки ўтказиб юборинг."
+            "☎️ <b>7/9 Қўшимча телефон рақам</b>\n\n"
+            "Иккинчи телефон рақамингизни киритинг.\n\n"
+            "<i>Масалан: +998901234567</i>"
         ),
-        "skip": "⏭ Ўтказиб юбориш",
         "prompt_email": (
-            "✉️ <b>7/8 Email address</b>\n\n"
+            "✉️ <b>8/9 Email</b>\n\n"
             "Фаол электрон почта манзилингизни киритинг."
         ),
         "prompt_passport": (
-            "🛂 <b>8/8 Хорижга чиқиш паспорти</b>\n\n"
+            "🛂 <b>9/9 Хорижга чиқиш паспорти</b>\n\n"
             "Паспорт суратини ёки скан нусхасини юборинг.\n\n"
             "Талаблар:\n"
             "• JPG yoki PNG format\n"
@@ -158,11 +191,15 @@ TEXTS = {
             "🛡 Тўлов номзод файлини давом эттириш учун кафолат бўлади.\n\n"
             "📎 Тўловни амалга ошириб, чек расмини юборинг."
         ),
-        "invalid_full_name": "Исм-фамилия камида исм ва фамилиядан иборат бўлиши керак.",
+        "invalid_full_name": (
+            "⚠️ Илтимос, исм ва фамилияни тўлиқ юборинг.\n\n"
+            "Тўғри формат: <code>ABDULLAYEV AZIZBEK</code>"
+        ),
         "invalid_birth_date": "Сана формати нотўғри. Илтимос, КУН.ОЙ.ЙИЛ форматида юборинг.",
         "invalid_phone": "Телефон рақами нотўғри. Илтимос, <code>+998901234567</code> каби форматда қайтадан юборинг.",
         "invalid_email": "Email манзил нотўғри. Илтимос, тўғри email манзилни қайтадан юборинг.",
         "invalid_passport": "Фақат JPG ёки PNG форматдаги расм юборинг.",
+        "application_received": "✅ Маълумотларингиз қабул қилинди.",
         "saved": "Қабул қилинди.",
         "select_value": "Қуйидагилардан бирини танланг.",
         "language_changed": "Тил ўзгартирилди.",
@@ -232,24 +269,28 @@ TEXTS = {
         "change_language": "🌐 Сменить язык",
         "go_payment": "💳 Перейти к оплате",
         "payment_title": (
-            "💳 <b>Выберите способ оплаты</b>\n"
-            "━━━━━━━━━━━━━━\n\n"
-            "Выберите одну из платежных систем ниже."
+            "💰 <b>Данные для оплаты:</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "💳 <b>Номер карты:</b> <code>4073420063643757</code>\n"
+            "👤 <b>Владелец:</b> Hasanov B\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "☑️ Отправьте нужную сумму и нажмите кнопку <b>« Я оплатил »</b>."
         ),
-        "payment_selected": "Способ оплаты выбран.",
-        "payment_saved_note": "Реквизиты карты показаны. Теперь загрузите квитанцию.",
+        "payment_selected": "Переход к оплате выполнен.",
+        "payment_saved_note": "Платежные данные показаны.",
         "payment_details": (
-            "💳 <b>{payment_method}</b>\n"
-            "━━━━━━━━━━━━━━\n\n"
-            "Для всех платежных систем используются одинаковые реквизиты:\n\n"
-            "💳 <b>Номер карты:</b>\n<code>4073420063643757</code>\n\n"
-            "👤 <b>Владелец:</b>\nHasanov B"
+            "💰 <b>Данные для оплаты:</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "💳 <b>Номер карты:</b> <code>4073420063643757</code>\n"
+            "👤 <b>Владелец:</b> Hasanov B\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "☑️ Отправьте нужную сумму и нажмите кнопку <b>« Я оплатил »</b>."
         ),
-        "upload_receipt_button": "📎 Загрузить квитанцию",
-        "payment_receipt_prompt": "📎 Загрузите квитанцию сюда.",
-        "payment_receipt_uploaded": "Ваш платеж отправлен администратору на проверку. Ожидайте ответа.",
-        "payment_receipt_invalid": "Отправьте квитанцию в виде изображения или файла.",
-        "payment_receipt_pending": "Сначала выберите способ оплаты, затем загрузите квитанцию.",
+        "payment_done_button": "✅ Я оплатил",
+        "payment_receipt_prompt": "📎 Загрузите квитанцию.\n\nОтправьте ее в виде PDF, изображения или файла.",
+        "payment_receipt_uploaded": "✅ Оплата принята. Администратор проверит ее. Пожалуйста, ожидайте.",
+        "payment_receipt_invalid": "Отправьте квитанцию в виде PDF, изображения или файла.",
+        "payment_receipt_pending": "Сначала оплатите и нажмите кнопку « Я оплатил ».",
         "prompt_nationality": (
             "🪪 <b>1/8 Гражданство</b>\n\n"
             "Выберите одну из стран ниже:"
@@ -272,24 +313,28 @@ TEXTS = {
             "🌾 <b>5/8 Опыт</b>\n\n"
             "Есть ли у вас опыт работы в сельском хозяйстве?"
         ),
+        "prompt_uk_experience": (
+            "🇬🇧 <b>6/9 Опыт сезонной работы в Англии</b>\n\n"
+            "Работали ли вы раньше на сезонной работе в Англии?"
+        ),
         "yes": "✅ Да",
         "no": "❌ Нет",
         "prompt_phone_primary": (
-            "📱 <b>6/8 Основной номер телефона</b>\n\n"
+            "📱 <b>7/9 Основной номер телефона</b>\n\n"
             "Введите ваш основной номер телефона.\n\n"
             "<i>Например: +998901234567</i>"
         ),
         "prompt_phone_secondary": (
-            "☎️ <b>6/8 Дополнительный номер</b>\n\n"
-            "Введите второй номер телефона."
+            "☎️ <b>7/9 Дополнительный номер</b>\n\n"
+            "Введите второй номер телефона.\n\n"
+            "<i>Например: +998901234567</i>"
         ),
-        "skip": "⏭ Пропустить",
         "prompt_email": (
-            "✉️ <b>7/8 Email address</b>\n\n"
+            "✉️ <b>8/9 Email</b>\n\n"
             "Введите ваш активный адрес электронной почты."
         ),
         "prompt_passport": (
-            "🛂 <b>8/8 Загранпаспорт</b>\n\n"
+            "🛂 <b>9/9 Загранпаспорт</b>\n\n"
             "Загрузите фото или скан загранпаспорта.\n\n"
             "Требования:\n"
             "• формат JPG или PNG\n"
@@ -303,11 +348,15 @@ TEXTS = {
             "🛡 Этот платеж служит гарантией продолжения работы по анкете кандидата.\n\n"
             "📎 После оплаты отправьте фото или скриншот чека."
         ),
-        "invalid_full_name": "Имя и фамилия должны содержать как минимум два слова.",
+        "invalid_full_name": (
+            "⚠️ Пожалуйста, отправьте имя и фамилию полностью.\n\n"
+            "Правильный формат: <code>ABDULLAYEV AZIZBEK</code>"
+        ),
         "invalid_birth_date": "Неверный формат даты. Пожалуйста, используйте ДД.ММ.ГГГГ.",
         "invalid_phone": "Неверный номер телефона. Отправьте заново в формате <code>+998901234567</code>.",
         "invalid_email": "Неверный email. Пожалуйста, отправьте корректный адрес заново.",
         "invalid_passport": "Отправьте изображение только в формате JPG или PNG.",
+        "application_received": "✅ Ваши данные приняты.",
         "saved": "Принято.",
         "select_value": "Выберите один из вариантов ниже.",
         "language_changed": "Язык изменен.",
@@ -342,11 +391,23 @@ FORM_STEPS = [
     "birth_date",
     "russian_level",
     "experience",
+    "uk_experience",
     "phone_primary",
     "phone_secondary",
     "email",
     "passport",
 ]
+
+TEXTS = _normalize_strings(TEXTS)
+NATIONALITIES = _normalize_strings(NATIONALITIES)
+TEXTS["uz"]["language_screen"] = (
+    "\U0001f310 <b>Tilni tanlang</b>\n\n"
+    "Bot keyingi barcha bosqichlarda siz tanlagan tilda ishlaydi."
+)
+TEXTS["ru"]["language_screen"] = (
+    "\U0001f310 <b>Выберите язык</b>\n\n"
+    "Бот будет работать на выбранном вами языке на всех следующих этапах."
+)
 
 PAYMENT_METHODS = {
     "payme": "💠 Payme",
@@ -356,6 +417,8 @@ PAYMENT_METHODS = {
     "humo_uzcard": "💳 Humo / Uzcard",
     "visa_mastercard": "🌐 Visa / Mastercard",
 }
+
+PAYMENT_METHODS = _normalize_strings(PAYMENT_METHODS)
 
 
 def get_bot_token() -> str:
@@ -374,6 +437,73 @@ def get_bot_token() -> str:
     return token
 
 
+def release_instance_lock() -> None:
+    global _INSTANCE_LOCK_FD
+
+    if _INSTANCE_LOCK_FD is None:
+        return
+
+    try:
+        os.close(_INSTANCE_LOCK_FD)
+    except OSError:
+        pass
+
+    _INSTANCE_LOCK_FD = None
+
+    try:
+        _INSTANCE_LOCK_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _read_lock_pid() -> int | None:
+    if not _INSTANCE_LOCK_PATH.exists():
+        return None
+
+    try:
+        raw_value = _INSTANCE_LOCK_PATH.read_text(encoding="ascii").strip()
+    except OSError:
+        return None
+
+    if not raw_value.isdigit():
+        return None
+
+    return int(raw_value)
+
+
+def _is_process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def acquire_instance_lock() -> None:
+    global _INSTANCE_LOCK_FD
+
+    if _INSTANCE_LOCK_FD is not None:
+        return
+
+    stale_pid = _read_lock_pid()
+    if stale_pid is not None and not _is_process_alive(stale_pid):
+        try:
+            _INSTANCE_LOCK_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    try:
+        _INSTANCE_LOCK_FD = os.open(
+            _INSTANCE_LOCK_PATH,
+            os.O_CREAT | os.O_EXCL | os.O_RDWR,
+        )
+    except FileExistsError as exc:
+        raise RuntimeError("Another bot.py instance is already running.") from exc
+
+    os.write(_INSTANCE_LOCK_FD, str(os.getpid()).encode("ascii"))
+    atexit.register(release_instance_lock)
+
+
 def get_session(user_id: int) -> dict[str, Any]:
     return user_sessions.setdefault(
         user_id,
@@ -383,12 +513,19 @@ def get_session(user_id: int) -> dict[str, Any]:
             "step": None,
             "data": {},
             "bot_message_id": None,
+            "previous_bot_message_id": None,
             "lead_id": None,
             "telegram_user_id": user_id,
             "payment_method": None,
             "awaiting_support": False,
             "admin_reply_user_id": None,
             "admin_reply_request_id": None,
+            "notice": None,
+            "current_page": 0,
+            "page_total": len(FORM_STEPS),
+            "return_screen": "intro",
+            "return_step": None,
+            "cabinet_text": None,
         },
     )
 
@@ -406,9 +543,76 @@ def clear_support_flags(session: dict[str, Any]) -> None:
     session["admin_reply_request_id"] = None
 
 
+def set_notice(session: dict[str, Any], message: str | None) -> None:
+    session["notice"] = message
+
+
+def hydrate_session(user_id: int) -> dict[str, Any]:
+    session = get_session(user_id)
+    if session.get("language"):
+        return session
+
+    user_row = get_user(user_id)
+    if user_row and user_row.get("language"):
+        session["language"] = user_row["language"]
+
+    return session
+
+
+def resolve_language(session: dict[str, Any]) -> str:
+    language = session.get("language")
+    if language in TEXTS:
+        return language
+
+    telegram_user_id = session.get("telegram_user_id")
+    if telegram_user_id:
+        user_row = get_user(int(telegram_user_id))
+        if user_row and user_row.get("language") in TEXTS:
+            session["language"] = user_row["language"]
+            return user_row["language"]
+
+    return "uz"
+
+
 def text(session: dict[str, Any], key: str) -> str:
-    language = session.get("language") or "uz"
-    return TEXTS[language][key]
+    language = resolve_language(session)
+    return _fix_mojibake(TEXTS[language][key])
+
+
+def payment_receipt_success_text(session: dict[str, Any]) -> str:
+    language = resolve_language(session)
+    logging.info("payment receipt upload language=%s", language)
+    if language == "uz":
+        return "✅ Тўлов қабул қилинди. Админ томонидан текширилади. Илтимос, кутинг."
+    if language == "ru":
+        return "✅ Оплата принята. Администратор проверит ее. Пожалуйста, ожидайте."
+    return "✅ Тўлов қабул қилинди. Админ томонидан текширилади. Илтимос, кутинг."
+
+    if language == "uz":
+        return "✅ Тўлов қабул қилинди. Админ томонидан текширилади. Илтимос, кутинг."
+    if language == "ru":
+        return "✅ Оплата принята. Администратор проверит ее. Пожалуйста, ожидайте."
+    return "✅ Тўлов қабул қилинди. Админ томонидан текширилади. Илтимос, кутинг."
+
+
+def update_current_page(session: dict[str, Any]) -> None:
+    if session.get("screen") == "form" and session.get("step") in FORM_STEPS:
+        session["current_page"] = FORM_STEPS.index(session["step"]) + 1
+        session["page_total"] = len(FORM_STEPS)
+        return
+
+    session["current_page"] = 0
+    session["page_total"] = len(FORM_STEPS)
+
+
+def remember_return_target(session: dict[str, Any]) -> None:
+    session["return_screen"] = session.get("screen", "intro")
+    session["return_step"] = session.get("step")
+
+
+def restore_return_target(session: dict[str, Any]) -> None:
+    session["screen"] = session.get("return_screen") or "intro"
+    session["step"] = session.get("return_step")
 
 
 def get_admin_telegram_id() -> int | None:
@@ -447,6 +651,7 @@ def with_inline_main_actions(
 
 
 def build_support_admin_keyboard(language: str, request_id: int, user_id: int) -> InlineKeyboardMarkup:
+    language = language if language in TEXTS else "uz"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -493,6 +698,19 @@ def build_language_keyboard(session: dict[str, Any]) -> InlineKeyboardMarkup:
     else:
         first = InlineKeyboardButton(text="🇺🇿 Ўзбекча", callback_data="lang:uz")
         second = InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:ru")
+
+    return InlineKeyboardMarkup(inline_keyboard=[[first, second]])
+
+
+def build_language_keyboard(session: dict[str, Any]) -> InlineKeyboardMarkup:
+    russian_label = "\U0001f1f7\U0001f1fa \u0420\u0443\u0441\u0441\u043a\u0438\u0439"
+    uzbek_label = "\U0001f1fa\U0001f1ff O'zbekcha"
+    if session.get("language") == "ru":
+        first = InlineKeyboardButton(text=russian_label, callback_data="lang:ru")
+        second = InlineKeyboardButton(text=uzbek_label, callback_data="lang:uz")
+    else:
+        first = InlineKeyboardButton(text=uzbek_label, callback_data="lang:uz")
+        second = InlineKeyboardButton(text=russian_label, callback_data="lang:ru")
 
     return InlineKeyboardMarkup(inline_keyboard=[[first, second]])
 
@@ -544,10 +762,19 @@ def build_step_keyboard(session: dict[str, Any]) -> InlineKeyboardMarkup | None:
                 [InlineKeyboardButton(text=text(session, "back"), callback_data="back:step")],
             ],
         )
+    if step == "uk_experience":
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text=text(session, "yes"), callback_data="set:uk_experience:yes"),
+                    InlineKeyboardButton(text=text(session, "no"), callback_data="set:uk_experience:no"),
+                ],
+                [InlineKeyboardButton(text=text(session, "back"), callback_data="back:step")],
+            ],
+        )
     if step == "phone_secondary":
         return InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text=text(session, "skip"), callback_data="set:phone_secondary:skip")],
                 [InlineKeyboardButton(text=text(session, "back"), callback_data="back:step")],
             ],
         )
@@ -562,7 +789,7 @@ def build_summary_keyboard(session: dict[str, Any]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=text(session, "go_payment"), callback_data="nav:payment")],
-            [InlineKeyboardButton(text=text(session, "back"), callback_data="nav:intro")],
+            [InlineKeyboardButton(text=text(session, "back"), callback_data="back:step")],
         ]
     )
 
@@ -571,18 +798,7 @@ def build_payment_keyboard(session: dict[str, Any]) -> InlineKeyboardMarkup:
     return with_inline_main_actions(
         session,
         [
-            [
-                InlineKeyboardButton(text=PAYMENT_METHODS["payme"], callback_data="payment:payme"),
-                InlineKeyboardButton(text=PAYMENT_METHODS["click"], callback_data="payment:click"),
-            ],
-            [
-                InlineKeyboardButton(text=PAYMENT_METHODS["uzum"], callback_data="payment:uzum"),
-                InlineKeyboardButton(text=PAYMENT_METHODS["paynet"], callback_data="payment:paynet"),
-            ],
-            [
-                InlineKeyboardButton(text=PAYMENT_METHODS["humo_uzcard"], callback_data="payment:humo_uzcard"),
-                InlineKeyboardButton(text=PAYMENT_METHODS["visa_mastercard"], callback_data="payment:visa_mastercard"),
-            ],
+            [InlineKeyboardButton(text=text(session, "payment_done_button"), callback_data="payment:confirm")],
             [InlineKeyboardButton(text=text(session, "back"), callback_data="nav:summary")],
         ],
     )
@@ -592,7 +808,6 @@ def build_payment_receipt_keyboard(session: dict[str, Any]) -> InlineKeyboardMar
     return with_inline_main_actions(
         session,
         [
-            [InlineKeyboardButton(text=text(session, "upload_receipt_button"), callback_data="nav:receipt_upload")],
             [InlineKeyboardButton(text=text(session, "back"), callback_data="nav:payment")],
         ],
     )
@@ -603,6 +818,22 @@ def build_payment_upload_keyboard(session: dict[str, Any]) -> InlineKeyboardMark
         session,
         [[InlineKeyboardButton(text=text(session, "back"), callback_data="nav:payment_receipt")]],
     )
+
+
+def build_help_keyboard(session: dict[str, Any]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=text(session, "back"), callback_data="nav:return")]],
+    )
+
+
+def build_cabinet_keyboard(session: dict[str, Any]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=text(session, "back"), callback_data="nav:return")]],
+    )
+
+
+def build_completed_keyboard(session: dict[str, Any]) -> InlineKeyboardMarkup:
+    return with_inline_main_actions(session, [])
 
 
 def current_screen_content(session: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup | None]:
@@ -620,6 +851,7 @@ def current_screen_content(session: dict[str, Any]) -> tuple[str, InlineKeyboard
             "birth_date": "prompt_birth_date",
             "russian_level": "prompt_russian_level",
             "experience": "prompt_experience",
+            "uk_experience": "prompt_uk_experience",
             "phone_primary": "prompt_phone_primary",
             "phone_secondary": "prompt_phone_secondary",
             "email": "prompt_email",
@@ -627,21 +859,32 @@ def current_screen_content(session: dict[str, Any]) -> tuple[str, InlineKeyboard
         }[session["step"]]
         return text(session, prompt_key), build_step_keyboard(session)
     if screen == "payment":
-        return text(session, "payment_title"), build_payment_keyboard(session)
+        return text(session, "payment_details"), build_payment_keyboard(session)
     if screen == "payment_receipt":
-        payment_method = PAYMENT_METHODS.get(session.get("payment_method"), "")
-        return (
-            text(session, "payment_details").format(payment_method=payment_method),
-            build_payment_receipt_keyboard(session),
-        )
+        return text(session, "payment_receipt_prompt"), build_payment_receipt_keyboard(session)
     if screen == "payment_upload":
         return text(session, "payment_receipt_prompt"), build_payment_upload_keyboard(session)
+    if screen == "help":
+        return text(session, "help_prompt"), build_help_keyboard(session)
+    if screen == "cabinet":
+        return session.get("cabinet_text") or "", build_cabinet_keyboard(session)
+    if screen == "completed":
+        return text(session, "application_received"), build_completed_keyboard(session)
     return text(session, "summary"), build_summary_keyboard(session)
 
 
 async def delete_message_safe(message: Message) -> None:
     try:
         await message.delete()
+    except Exception:
+        return
+
+
+async def delete_message_by_id_safe(chat_id: int, message_id: int | None, bot: Bot) -> None:
+    if not message_id:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
         return
 
@@ -656,9 +899,49 @@ async def answer_callback_safe(callback: CallbackQuery, text_value: str | None =
         raise
 
 
-async def render(session: dict[str, Any], chat_id: int, bot: Bot) -> None:
+async def reject_stale_callback(session: dict[str, Any], callback: CallbackQuery, bot: Bot) -> bool:
+    if not callback.message:
+        return False
+
+    current_message_id = session.get("bot_message_id")
+    if not current_message_id or callback.message.message_id == current_message_id:
+        return False
+
+    await answer_callback_safe(callback)
+    await delete_message_safe(callback.message)
+    return True
+
+
+def sync_session_message(session: dict[str, Any], callback: CallbackQuery) -> None:
+    if callback.message:
+        session["bot_message_id"] = callback.message.message_id
+
+
+async def clear_tracked_messages(
+    session: dict[str, Any],
+    chat_id: int,
+    bot: Bot,
+    keep_message_id: int | None = None,
+) -> None:
+    for key in ("bot_message_id", "previous_bot_message_id"):
+        message_id = session.get(key)
+        if message_id and message_id != keep_message_id:
+            await delete_message_by_id_safe(chat_id, message_id, bot)
+        session[key] = keep_message_id if key == "bot_message_id" else None
+
+
+async def render(
+    session: dict[str, Any],
+    chat_id: int,
+    bot: Bot,
+    source_message: Message | None = None,
+) -> None:
+    update_current_page(session)
     content, keyboard = current_screen_content(session)
-    message_id = session.get("bot_message_id")
+    notice = session.get("notice")
+    if notice:
+        content = f"{notice}\n\n{content}"
+    message_id = source_message.message_id if source_message else session.get("bot_message_id")
 
     if message_id:
         try:
@@ -668,17 +951,37 @@ async def render(session: dict[str, Any], chat_id: int, bot: Bot) -> None:
                 text=content,
                 reply_markup=keyboard,
             )
+            await clear_tracked_messages(session, chat_id, bot, keep_message_id=message_id)
+            session["notice"] = None
             return
-        except Exception:
-            session["bot_message_id"] = None
+        except TelegramBadRequest as exc:
+            error_text = str(exc).lower()
+            if "message is not modified" in error_text:
+                await clear_tracked_messages(session, chat_id, bot, keep_message_id=message_id)
+                session["notice"] = None
+                return
+            if "message to edit not found" not in error_text:
+                raise
 
+    await clear_tracked_messages(session, chat_id, bot)
     sent = await bot.send_message(chat_id=chat_id, text=content, reply_markup=keyboard)
     session["bot_message_id"] = sent.message_id
+    session["previous_bot_message_id"] = None
+    session["notice"] = None
 
 
 def validate_full_name(value: str) -> bool:
     cleaned = " ".join(value.split())
-    return len(cleaned.split()) >= 2
+    parts = cleaned.split()
+    if len(parts) != 2:
+        return False
+
+    for part in parts:
+        normalized = part.replace("-", "").replace("'", "")
+        if len(normalized) < 2 or not normalized.isalpha():
+            return False
+
+    return True
 
 
 def validate_birth_date(value: str) -> bool:
@@ -714,6 +1017,10 @@ def previous_state(session: dict[str, Any]) -> None:
     if session["screen"] == "terms":
         session["screen"] = "intro"
         return
+    if session["screen"] == "summary":
+        session["screen"] = "form"
+        session["step"] = "passport"
+        return
     if session["screen"] != "form" or step is None:
         session["screen"] = "intro"
         return
@@ -726,7 +1033,8 @@ def previous_state(session: dict[str, Any]) -> None:
 
 
 async def start_handler(message: Message, bot: Bot) -> None:
-    session = get_session(message.from_user.id)
+    session = hydrate_session(message.from_user.id)
+    await clear_tracked_messages(session, message.chat.id, bot)
     session["telegram_user_id"] = message.from_user.id
     clear_support_flags(session)
     referral_code = extract_referral_code(parse_start_payload(message))
@@ -744,14 +1052,17 @@ async def start_handler(message: Message, bot: Bot) -> None:
 
 
 async def language_handler(callback: CallbackQuery, bot: Bot) -> None:
-    session = get_session(callback.from_user.id)
+    session = hydrate_session(callback.from_user.id)
+    if await reject_stale_callback(session, callback, bot):
+        return
+    sync_session_message(session, callback)
     session["telegram_user_id"] = callback.from_user.id
     session["language"] = callback.data.split(":")[1]
     session["screen"] = "intro"
     reset_form(session)
     user_row = get_user(callback.from_user.id)
     if user_row:
-        ensure_user(
+        user_row = ensure_user(
             {
                 "telegram_user_id": callback.from_user.id,
                 "telegram_chat_id": callback.message.chat.id,
@@ -762,12 +1073,16 @@ async def language_handler(callback: CallbackQuery, bot: Bot) -> None:
                 "referrer_user_id": user_row.get("referrer_user_id"),
             }
         )
+        session["language"] = user_row.get("language") or session["language"]
     await answer_callback_safe(callback, text(session, "language_changed"))
-    await render(session, callback.message.chat.id, bot)
+    await render(session, callback.message.chat.id, bot, callback.message)
 
 
 async def navigation_handler(callback: CallbackQuery, bot: Bot) -> None:
-    session = get_session(callback.from_user.id)
+    session = hydrate_session(callback.from_user.id)
+    if await reject_stale_callback(session, callback, bot):
+        return
+    sync_session_message(session, callback)
     target = callback.data.split(":")[1]
     if target == "language":
         session["screen"] = "language"
@@ -784,33 +1099,55 @@ async def navigation_handler(callback: CallbackQuery, bot: Bot) -> None:
         session["screen"] = "payment_upload"
     elif target == "summary":
         session["screen"] = "summary"
+    elif target == "return":
+        restore_return_target(session)
     elif target == "help":
+        remember_return_target(session)
         session["awaiting_support"] = True
         session["admin_reply_user_id"] = None
         session["admin_reply_request_id"] = None
-        await answer_callback_safe(callback)
-        await callback.message.answer(text(session, "help_prompt"))
-        return
+        session["screen"] = "help"
     elif target == "cabinet":
-        await answer_callback_safe(callback)
-        await send_cabinet_message(callback.message.chat.id, callback.from_user.id, bot, session)
-        return
+        remember_return_target(session)
+        user_stub = {
+            "telegram_user_id": callback.from_user.id,
+            "telegram_chat_id": callback.message.chat.id,
+            "language": session.get("language"),
+            "username": callback.from_user.username,
+            "first_name": callback.from_user.first_name,
+            "last_name": callback.from_user.last_name,
+            "referrer_user_id": None,
+        }
+        user_row = ensure_user(user_stub)
+        me = await bot.get_me()
+        session["cabinet_text"] = text(session, "cabinet_title").format(
+            referral_link=build_referral_link(me.username, user_row["referral_code"]),
+            referral_count=get_referral_count(callback.from_user.id),
+        )
+        session["screen"] = "cabinet"
     await answer_callback_safe(callback)
-    await render(session, callback.message.chat.id, bot)
+    await render(session, callback.message.chat.id, bot, callback.message)
 
 
 async def form_start_handler(callback: CallbackQuery, bot: Bot) -> None:
-    session = get_session(callback.from_user.id)
+    session = hydrate_session(callback.from_user.id)
+    if await reject_stale_callback(session, callback, bot):
+        return
+    sync_session_message(session, callback)
     session["screen"] = "form"
     session["step"] = "nationality"
     session["data"] = {}
     await answer_callback_safe(callback)
-    await render(session, callback.message.chat.id, bot)
+    await render(session, callback.message.chat.id, bot, callback.message)
 
 
 async def set_value_handler(callback: CallbackQuery, bot: Bot) -> None:
-    session = get_session(callback.from_user.id)
+    session = hydrate_session(callback.from_user.id)
+    if await reject_stale_callback(session, callback, bot):
+        return
+    sync_session_message(session, callback)
     _, field, value = callback.data.split(":", maxsplit=2)
+    session["screen"] = "form"
 
     if field == "nationality":
         session["data"]["nationality"] = value
@@ -820,17 +1157,23 @@ async def set_value_handler(callback: CallbackQuery, bot: Bot) -> None:
         session["step"] = "experience"
     elif field == "experience":
         session["data"]["experience"] = value
+        session["step"] = "uk_experience"
+    elif field == "uk_experience":
+        session["data"]["uk_experience"] = value
         session["step"] = "phone_primary"
     elif field == "phone_secondary":
         session["data"]["phone_secondary"] = None if value == "skip" else value
         session["step"] = "email"
 
     await answer_callback_safe(callback, text(session, "saved"))
-    await render(session, callback.message.chat.id, bot)
+    await render(session, callback.message.chat.id, bot, callback.message)
 
 
 async def back_handler(callback: CallbackQuery, bot: Bot) -> None:
-    session = get_session(callback.from_user.id)
+    session = hydrate_session(callback.from_user.id)
+    if await reject_stale_callback(session, callback, bot):
+        return
+    sync_session_message(session, callback)
     target = callback.data.split(":", maxsplit=1)[1]
     if target == "terms":
         session["screen"] = "terms"
@@ -838,7 +1181,7 @@ async def back_handler(callback: CallbackQuery, bot: Bot) -> None:
     else:
         previous_state(session)
     await answer_callback_safe(callback)
-    await render(session, callback.message.chat.id, bot)
+    await render(session, callback.message.chat.id, bot, callback.message)
 
 
 async def finalize_form(session: dict[str, Any], chat_id: int, bot: Bot) -> None:
@@ -852,6 +1195,7 @@ async def finalize_form(session: dict[str, Any], chat_id: int, bot: Bot) -> None
             "birth_date": session["data"]["birth_date"],
             "russian_level": session["data"]["russian_level"],
             "agriculture_experience": session["data"]["experience"],
+            "uk_seasonal_experience": session["data"]["uk_experience"],
             "phone_primary": session["data"]["phone_primary"],
             "phone_secondary": session["data"].get("phone_secondary"),
             "email": session["data"]["email"],
@@ -859,20 +1203,31 @@ async def finalize_form(session: dict[str, Any], chat_id: int, bot: Bot) -> None
             "passport_kind": session["data"]["passport_kind"],
         }
     )
-    session["screen"] = "summary"
+    session["screen"] = "completed"
     session["step"] = None
     await render(session, chat_id, bot)
 
 
 async def payment_handler(callback: CallbackQuery, bot: Bot) -> None:
-    session = get_session(callback.from_user.id)
+    session = hydrate_session(callback.from_user.id)
+    if await reject_stale_callback(session, callback, bot):
+        return
+    sync_session_message(session, callback)
     method = callback.data.split(":", maxsplit=1)[1]
-    if session.get("lead_id"):
-        update_payment_method(session["lead_id"], method)
-    session["payment_method"] = method
-    session["screen"] = "payment_receipt"
-    await answer_callback_safe(callback, text(session, "payment_selected"))
-    await render(session, callback.message.chat.id, bot)
+    if method == "confirm":
+        method = "card"
+        if session.get("lead_id"):
+            update_payment_method(session["lead_id"], method)
+        session["payment_method"] = method
+        session["screen"] = "payment_upload"
+        await answer_callback_safe(callback)
+    else:
+        if session.get("lead_id"):
+            update_payment_method(session["lead_id"], method)
+        session["payment_method"] = method
+        session["screen"] = "payment_upload"
+        await answer_callback_safe(callback, text(session, "payment_selected"))
+    await render(session, callback.message.chat.id, bot, callback.message)
 
 
 async def send_receipt_to_admin(
@@ -897,47 +1252,68 @@ async def send_receipt_to_admin(
         "Ҳолат: <b>pending</b>"
     )
 
+    try:
+        if receipt_kind == "photo":
+            await bot.send_photo(chat_id=admin_chat_id, photo=receipt_file_id, caption=caption)
+        else:
+            await bot.send_document(chat_id=admin_chat_id, document=receipt_file_id, caption=caption)
+    except Exception:
+        logging.exception("Failed to forward payment receipt to admin.")
+
+
+async def send_receipt_to_admin(
+    bot: Bot,
+    session: dict[str, Any],
+    user_id: int,
+    chat_id: int,
+    receipt_file_id: str,
+    receipt_kind: str,
+) -> None:
+    admin_chat_id = get_admin_telegram_id()
+    if admin_chat_id is None:
+        return
+
+    payment_method = PAYMENT_METHODS.get(session.get("payment_method"), session.get("payment_method", ""))
+    caption = _fix_mojibake(
+        (
+            "ðŸ’¸ <b>Ð¯Ð½Ð³Ð¸ Ñ‚ÑžÐ»Ð¾Ð² ÐºÐ²Ð¸Ñ‚Ð°Ð½Ñ†Ð¸ÑÑÐ¸</b>\n\n"
+            f"Lead ID: <code>{session.get('lead_id')}</code>\n"
+            f"User ID: <code>{user_id}</code>\n"
+            f"Chat ID: <code>{chat_id}</code>\n"
+            f"Ð¢ÑžÐ»Ð¾Ð² ÑƒÑÑƒÐ»Ð¸: <b>{payment_method}</b>\n"
+            "Ò²Ð¾Ð»Ð°Ñ‚: <b>pending</b>"
+        )
+    )
+
     if receipt_kind == "photo":
         await bot.send_photo(chat_id=admin_chat_id, photo=receipt_file_id, caption=caption)
     else:
         await bot.send_document(chat_id=admin_chat_id, document=receipt_file_id, caption=caption)
 
 
-async def send_cabinet_message(chat_id: int, user_id: int, bot: Bot, session: dict[str, Any]) -> None:
-    user_stub = {
-        "telegram_user_id": user_id,
-        "telegram_chat_id": chat_id,
-        "language": session.get("language"),
-        "username": None,
-        "first_name": None,
-        "last_name": None,
-        "referrer_user_id": None,
-    }
-    user_row = ensure_user(user_stub)
-    me = await bot.get_me()
-    referral_link = build_referral_link(me.username, user_row["referral_code"])
-    referral_count = get_referral_count(user_id)
-    await bot.send_message(
-        chat_id=chat_id,
-        text=text(session, "cabinet_title").format(
-            referral_link=referral_link,
-            referral_count=referral_count,
-        ),
-    )
-
-
 async def cabinet_handler(message: Message, bot: Bot) -> None:
-    session = get_session(message.from_user.id)
+    session = hydrate_session(message.from_user.id)
     ensure_user(user_identity_payload(message, session))
-    await send_cabinet_message(message.chat.id, message.from_user.id, bot, session)
+    remember_return_target(session)
+    me = await bot.get_me()
+    user_row = get_user(message.from_user.id)
+    if user_row:
+        session["cabinet_text"] = text(session, "cabinet_title").format(
+            referral_link=build_referral_link(me.username, user_row["referral_code"]),
+            referral_count=get_referral_count(message.from_user.id),
+        )
+    session["screen"] = "cabinet"
+    await render(session, message.chat.id, bot)
 
 
 async def help_button_handler(message: Message, bot: Bot) -> None:
-    session = get_session(message.from_user.id)
+    session = hydrate_session(message.from_user.id)
+    remember_return_target(session)
     session["awaiting_support"] = True
     session["admin_reply_user_id"] = None
     session["admin_reply_request_id"] = None
-    await message.answer(text(session, "help_prompt"))
+    session["screen"] = "help"
+    await render(session, message.chat.id, bot)
 
 
 async def support_reply_callback_handler(callback: CallbackQuery, bot: Bot) -> None:
@@ -945,12 +1321,15 @@ async def support_reply_callback_handler(callback: CallbackQuery, bot: Bot) -> N
         await answer_callback_safe(callback)
         return
 
+    admin_session = hydrate_session(callback.from_user.id)
+    if await reject_stale_callback(admin_session, callback, bot):
+        return
+
     _, request_id, user_id = callback.data.split(":")
     support_request = get_support_request(int(request_id))
     if not support_request:
         await answer_callback_safe(callback)
         return
-    admin_session = get_session(callback.from_user.id)
     admin_session["admin_reply_request_id"] = int(request_id)
     admin_session["admin_reply_user_id"] = int(user_id)
     admin_session["awaiting_support"] = False
@@ -959,7 +1338,7 @@ async def support_reply_callback_handler(callback: CallbackQuery, bot: Bot) -> N
 
 
 async def support_message_handler(message: Message, bot: Bot) -> None:
-    session = get_session(message.from_user.id)
+    session = hydrate_session(message.from_user.id)
 
     if is_admin_user(message.from_user.id) and session.get("admin_reply_user_id"):
         request_id = session["admin_reply_request_id"]
@@ -989,7 +1368,9 @@ async def support_message_handler(message: Message, bot: Bot) -> None:
     request_id = create_support_request(message.from_user.id, question_text)
     admin_chat_id = get_admin_telegram_id()
     if admin_chat_id is None:
-        await message.answer(text(session, "help_admin_missing"))
+        set_notice(session, text(session, "help_admin_missing"))
+        await delete_message_safe(message)
+        await render(session, message.chat.id, bot)
         return
 
     admin_text = (
@@ -1005,54 +1386,63 @@ async def support_message_handler(message: Message, bot: Bot) -> None:
         reply_markup=build_support_admin_keyboard(session.get("language") or "uz", request_id, message.from_user.id),
     )
     set_support_admin_message(request_id, admin_message.message_id)
-    await message.answer(text(session, "help_sent"))
+    set_notice(session, text(session, "help_sent"))
+    await delete_message_safe(message)
+    restore_return_target(session)
+    await render(session, message.chat.id, bot)
 
 
 async def process_form_message(message: Message, bot: Bot) -> None:
-    session = get_session(message.from_user.id)
+    session = hydrate_session(message.from_user.id)
     if session.get("screen") != "form" or not session.get("step"):
         return
 
     step = session["step"]
     value = (message.text or "").strip()
 
-    if step in {"nationality", "russian_level", "experience", "passport"}:
-        await message.answer(text(session, "select_value"))
+    if step in {"nationality", "russian_level", "experience", "uk_experience", "passport"}:
+        set_notice(session, text(session, "select_value"))
         await delete_message_safe(message)
+        await render(session, message.chat.id, bot)
         return
 
     if step == "full_name":
         if not validate_full_name(value):
-            await message.answer(text(session, "invalid_full_name"))
+            set_notice(session, text(session, "invalid_full_name"))
             await delete_message_safe(message)
+            await render(session, message.chat.id, bot)
             return
         session["data"]["full_name"] = " ".join(value.split())
         session["step"] = "birth_date"
     elif step == "birth_date":
         if not validate_birth_date(value):
-            await message.answer(text(session, "invalid_birth_date"))
+            set_notice(session, text(session, "invalid_birth_date"))
             await delete_message_safe(message)
+            await render(session, message.chat.id, bot)
             return
         session["data"]["birth_date"] = value
         session["step"] = "russian_level"
     elif step == "phone_primary":
         if not validate_phone(value):
-            await message.answer(text(session, "invalid_phone"))
+            set_notice(session, text(session, "invalid_phone"))
             await delete_message_safe(message)
+            await render(session, message.chat.id, bot)
             return
         session["data"]["phone_primary"] = normalize_phone(value)
         session["step"] = "phone_secondary"
     elif step == "phone_secondary":
         if not validate_phone(value):
-            await message.answer(text(session, "invalid_phone"))
+            set_notice(session, text(session, "invalid_phone"))
             await delete_message_safe(message)
+            await render(session, message.chat.id, bot)
             return
         session["data"]["phone_secondary"] = normalize_phone(value)
         session["step"] = "email"
     elif step == "email":
         if not validate_email(value):
-            await message.answer(text(session, "invalid_email"))
+            set_notice(session, text(session, "invalid_email"))
             await delete_message_safe(message)
+            await render(session, message.chat.id, bot)
             return
         session["data"]["email"] = normalize_email(value)
         session["step"] = "passport"
@@ -1077,13 +1467,8 @@ def valid_document_name(file_name: str | None, mime_type: str | None) -> bool:
 
 
 async def passport_handler(message: Message, bot: Bot) -> None:
-    session = get_session(message.from_user.id)
-    if session.get("screen") == "payment_upload":
-        if not session.get("lead_id") or not session.get("payment_method"):
-            await message.answer(text(session, "payment_receipt_pending"))
-            await delete_message_safe(message)
-            return
-
+    session = hydrate_session(message.from_user.id)
+    if session.get("screen") == "form" and session.get("step") == "passport":
         is_valid = False
         file_id = None
         file_kind = None
@@ -1098,31 +1483,41 @@ async def passport_handler(message: Message, bot: Bot) -> None:
             file_kind = "photo"
 
         if not is_valid:
-            await message.answer(text(session, "payment_receipt_invalid"))
+            set_notice(session, text(session, "invalid_passport"))
             await delete_message_safe(message)
+            await render(session, message.chat.id, bot)
             return
 
-        attach_payment_receipt(session["lead_id"], file_id, file_kind)
-        await send_receipt_to_admin(
-            bot=bot,
-            session=session,
-            user_id=message.from_user.id,
-            chat_id=message.chat.id,
-            receipt_file_id=file_id,
-            receipt_kind=file_kind,
-        )
-        await message.answer(text(session, "payment_receipt_uploaded"))
+        session["data"]["passport_file_id"] = file_id
+        session["data"]["passport_kind"] = file_kind
         await delete_message_safe(message)
+        await finalize_form(session, message.chat.id, bot)
         return
 
-    if session.get("screen") != "form" or session.get("step") != "passport":
+    if (
+        session.get("screen") != "payment_upload"
+        or not session.get("lead_id")
+        or not session.get("payment_method")
+    ):
+        lead_row = get_latest_payment_lead(message.from_user.id)
+        if lead_row:
+            session["lead_id"] = lead_row["id"]
+            session["payment_method"] = lead_row.get("payment_method")
+            session["screen"] = "payment_upload"
+
+    if session.get("screen") != "payment_upload":
+        return
+
+    if not session.get("lead_id") or not session.get("payment_method"):
+        set_notice(session, text(session, "payment_receipt_pending"))
+        await render(session, message.chat.id, bot)
         return
 
     is_valid = False
     file_id = None
     file_kind = None
 
-    if message.document and valid_document_name(message.document.file_name, message.document.mime_type):
+    if message.document:
         is_valid = True
         file_id = message.document.file_id
         file_kind = "document"
@@ -1132,31 +1527,72 @@ async def passport_handler(message: Message, bot: Bot) -> None:
         file_kind = "photo"
 
     if not is_valid:
-        await message.answer(text(session, "invalid_passport"))
-        await delete_message_safe(message)
+        set_notice(session, text(session, "payment_receipt_invalid"))
+        await render(session, message.chat.id, bot)
         return
 
-    session["data"]["passport_file_id"] = file_id
-    session["data"]["passport_kind"] = file_kind
-    await delete_message_safe(message)
-    await finalize_form(session, message.chat.id, bot)
+    attach_payment_receipt(session["lead_id"], file_id, file_kind)
+    session["screen"] = "payment"
+    success_text = payment_receipt_success_text(session)
+    logging.info("sending payment receipt success message to chat_id=%s", message.chat.id)
+    try:
+        await message.answer(success_text)
+    except Exception:
+        logging.exception("Failed to send payment receipt success via message.answer.")
+        try:
+            await bot.send_message(chat_id=message.chat.id, text=success_text)
+        except Exception:
+            logging.exception("Failed to send payment receipt success via bot.send_message(chat_id).")
+    await send_receipt_to_admin(
+        bot=bot,
+        session=session,
+        user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        receipt_file_id=file_id,
+        receipt_kind=file_kind,
+    )
+    return
 
 
 async def unknown_handler(message: Message, bot: Bot) -> None:
-    session = get_session(message.from_user.id)
+    session = hydrate_session(message.from_user.id)
     if not session.get("language"):
         session["screen"] = "language"
         await render(session, message.chat.id, bot)
     elif session.get("screen") == "form":
-        await message.answer(text(session, "select_value"))
+        set_notice(session, text(session, "select_value"))
+        await render(session, message.chat.id, bot)
     elif session.get("screen") == "payment_upload":
-        await message.answer(text(session, "payment_receipt_invalid"))
+        set_notice(session, text(session, "payment_receipt_invalid"))
+        await render(session, message.chat.id, bot)
     else:
         await render(session, message.chat.id, bot)
     await delete_message_safe(message)
 
 
+def should_handle_unknown_message(message: Message) -> bool:
+    session = hydrate_session(message.from_user.id)
+
+    if message.text and message.text.startswith("/"):
+        return False
+
+    if session.get("awaiting_support"):
+        return False
+
+    if is_admin_user(message.from_user.id) and session.get("admin_reply_user_id") is not None:
+        return False
+
+    if session.get("screen") == "form":
+        return False
+
+    if session.get("screen") == "payment_upload":
+        return not bool(message.document or message.photo)
+
+    return not session.get("language")
+
+
 async def main() -> None:
+    acquire_instance_lock()
     init_db()
     bot = Bot(
         token=get_bot_token(),
@@ -1184,7 +1620,7 @@ async def main() -> None:
         ),
     )
     dp.message.register(process_form_message, F.text)
-    dp.message.register(unknown_handler)
+    dp.message.register(unknown_handler, should_handle_unknown_message)
 
     await dp.start_polling(bot)
 

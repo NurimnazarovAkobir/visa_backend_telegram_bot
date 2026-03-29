@@ -28,6 +28,7 @@ def init_db() -> None:
                 birth_date TEXT NOT NULL,
                 russian_level INTEGER NOT NULL,
                 agriculture_experience TEXT NOT NULL,
+                uk_seasonal_experience TEXT NOT NULL DEFAULT 'no',
                 phone_primary TEXT NOT NULL,
                 phone_secondary TEXT,
                 email TEXT NOT NULL,
@@ -49,6 +50,10 @@ def init_db() -> None:
             connection.execute("ALTER TABLE leads ADD COLUMN receipt_file_id TEXT")
         if "receipt_kind" not in columns:
             connection.execute("ALTER TABLE leads ADD COLUMN receipt_kind TEXT")
+        if "uk_seasonal_experience" not in columns:
+            connection.execute(
+                "ALTER TABLE leads ADD COLUMN uk_seasonal_experience TEXT NOT NULL DEFAULT 'no'"
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -271,6 +276,7 @@ def create_lead(payload: dict[str, Any]) -> int:
                 birth_date,
                 russian_level,
                 agriculture_experience,
+                uk_seasonal_experience,
                 phone_primary,
                 phone_secondary,
                 email,
@@ -281,7 +287,7 @@ def create_lead(payload: dict[str, Any]) -> int:
                 receipt_file_id,
                 receipt_kind
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload["telegram_user_id"],
@@ -292,6 +298,7 @@ def create_lead(payload: dict[str, Any]) -> int:
                 payload["birth_date"],
                 payload["russian_level"],
                 payload["agriculture_experience"],
+                payload["uk_seasonal_experience"],
                 payload["phone_primary"],
                 payload.get("phone_secondary"),
                 payload["email"],
@@ -319,6 +326,23 @@ def get_lead(lead_id: int) -> dict[str, Any] | None:
         row = connection.execute(
             "SELECT * FROM leads WHERE id = ?",
             (lead_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_latest_payment_lead(telegram_user_id: int) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM leads
+            WHERE telegram_user_id = ?
+              AND payment_method IS NOT NULL
+              AND receipt_file_id IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (telegram_user_id,),
         ).fetchone()
         return dict(row) if row else None
 
