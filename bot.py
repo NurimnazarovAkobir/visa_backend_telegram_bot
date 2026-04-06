@@ -1,5 +1,6 @@
 import asyncio
 import atexit
+import json
 import logging
 import os
 import re
@@ -25,12 +26,16 @@ from database import (
     create_support_request,
     ensure_user,
     get_latest_payment_lead,
+    list_due_abandoned_checkout_leads,
+    mark_abandoned_checkout_reminded,
     get_referral_count,
     get_support_request,
     get_user,
     get_user_by_referral_code,
     init_db,
+    save_user_session,
     set_support_admin_message,
+    update_lead,
     update_payment_method,
 )
 
@@ -90,17 +95,13 @@ TEXTS = {
         ),
         "intro_button": "📘 Танишиш",
         "terms": (
-            "📜 <b>Фойдаланиш шартлари / Согласие с условиями</b>\n"
-            "━━━━━━━━━━━━━━\n\n"
-            "«Розиман» тугмасини босиш орқали сиз қуйидагиларни тасдиқлайсиз:\n"
-            "— ишончли шахсий маълумотларни тақдим этасиз\n"
-            "— бот ариза топшириш жараёнида ёпиқ каналлар орқали ёрдам кўрсатишини тушунасиз\n"
-            "— ўзаро алоқа конфиденциал форматда амалга оширилишини англайсиз\n"
-            "— рус тилининг базавий билимларига эгасиз\n"
-            "— интервью санаси ва кейинги босқичлар визавий операторлар томонидан белгиланишини тушунасиз\n"
-            "— бот хизматларидан ихтиёрий равишда фойдаланасиз ва барча шартларни қабул қиласиз\n"
+            "<b>Буюк Британияда мавсумий иш</b>\n\n"
+            "<b>Телеграм бот орқали мавсумий ишларга рўйхатдан ўтиш саҳифасига хуш келибсиз.</b>\n"
+            "Бу ерда сиз Буюк Британиядаги мавсумий ишчилар дастурида иштирок этиш учун ариза топширишингиз мумкин.\n\n"
+            "Илтимос, ўзингизнинг исмингиз, фамилиянгиз, хорижий паспорт рақамингиз, электрон почта манзилингиз ва телефон рақамингизни киритишга тайёр бўлинг.\n\n"
+            "<b>Нега бизга шахсий маълумотларингиз керак ва улар қандай қайта ишланади? Биз сизнинг шахсий маълумотларингизнинг маъмури ҳисобланамиз ва уларни Шахсий маълумотларни ҳимоя қилиш бўйича умумий регламент (GDPR) талабларига мувофиқ қайта ишлаймиз. Сизнинг шахсий маълумотларингизни йиғиш келгусидаги интервьюларда иштирок этиш учун номзодингизни кўриб чиқиш мақсадида зарур.</b>\n\n"
             "— ушбу бот орқали координаторлар жамоаси билан тўғридан-тўғри алоқа амалга оширилишини тушунасиз\n"
-            "— бот орқали рўйхатдан ўтиш ‼️ПУЛЛИК\n\n"
+            "— бот орқали рўйхатдан ўтиш <b>‼️ПУЛЛИК</b>\n\n"
             "⚠️ <b>Муҳим:</b>\n"
             "Бот давлат органи эмас.\n"
             "Ботдан фойдаланиш жараёнида олинган барча маълумотлар конфиденциал сақланиши керак.\n"
@@ -117,7 +118,7 @@ TEXTS = {
             "💳 <b>Karta raqam:</b> <code>4073420063643757</code>\n"
             "👤 <b>Egasi:</b> Hasanov B\n"
             "━━━━━━━━━━━━━━━\n\n"
-            "☑️ Kerakli summani yuboring va <b>« To'lov qildim »</b> tugmasini bosing."
+        "\u2611\ufe0f \u041a\u0435\u0440\u0430\u043a\u043b\u0438 \u0441\u0443\u043c\u043c\u0430\u043d\u0438 \u044e\u0431\u043e\u0440\u0438\u043d\u0433 \u0432\u0430 <b>\u00ab \u0422\u045e\u043b\u043e\u0432 \u049b\u0438\u043b\u0434\u0438\u043c \u00bb</b> \u0442\u0443\u0433\u043c\u0430\u0441\u0438\u043d\u0438 \u0431\u043e\u0441\u0438\u043d\u0433."
         ),
         "payment_selected": "Тўлов қилиш босқичига ўтилди.",
         "payment_saved_note": "Тўлов маълумотлари чиқарилди.",
@@ -127,20 +128,20 @@ TEXTS = {
             "💳 <b>Karta raqam:</b> <code>4073420063643757</code>\n"
             "👤 <b>Egasi:</b> Hasanov B\n"
             "━━━━━━━━━━━━━━━\n\n"
-            "☑️ Kerakli summani yuboring va <b>« To'lov qildim »</b> tugmasini bosing."
+        "\u2611\ufe0f \u041a\u0435\u0440\u0430\u043a\u043b\u0438 \u0441\u0443\u043c\u043c\u0430\u043d\u0438 \u044e\u0431\u043e\u0440\u0438\u043d\u0433 \u0432\u0430 <b>\u00ab \u0422\u045e\u043b\u043e\u0432 \u049b\u0438\u043b\u0434\u0438\u043c \u00bb</b> \u0442\u0443\u0433\u043c\u0430\u0441\u0438\u043d\u0438 \u0431\u043e\u0441\u0438\u043d\u0433."
         ),
-        "payment_done_button": "✅ To'lov qildim",
+    "payment_done_button": "\u2705 \u0422\u045e\u043b\u043e\u0432 \u049b\u0438\u043b\u0434\u0438\u043c",
         "payment_receipt_prompt": "📎 Квитанцияни юкланг.\n\nPDF, расм ёки файл кўринишида юборинг.",
         "payment_receipt_uploaded": "✅ Тўлов қабул қилинди. Админ томонидан текширилади. Илтимос, кутинг.",
         "payment_receipt_invalid": "Квитанцияни PDF, расм ёки файл кўринишида юборинг.",
-        "payment_receipt_pending": "Аввал тўлов қилинг ва « To'lov qildim » тугмасини босинг.",
+    "payment_receipt_pending": "\u0410\u0432\u0432\u0430\u043b \u0442\u045e\u043b\u043e\u0432 \u049b\u0438\u043b\u0438\u043d\u0433 \u0432\u0430 \u00ab \u0422\u045e\u043b\u043e\u0432 \u049b\u0438\u043b\u0434\u0438\u043c \u00bb \u0442\u0443\u0433\u043c\u0430\u0441\u0438\u043d\u0438 \u0431\u043e\u0441\u0438\u043d\u0433.",
         "prompt_nationality": (
             "🪪 <b>1/8 Фуқаролигингизни танланг</b>\n\n"
             "Қуйидаги давлатлардан бирини танланг:"
         ),
         "prompt_full_name": (
             "👤 <b>2/8 Исм-фамилия</b>\n\n"
-            "Исм ва фамилиянгизни passport'дагидек киритинг.\n\n"
+        "\u0418\u0441\u043c \u0432\u0430 \u0444\u0430\u043c\u0438\u043b\u0438\u044f\u043d\u0433\u0438\u0437\u043d\u0438 \u043f\u0430\u0441\u043f\u043e\u0440\u0442\u0434\u0430\u0433\u0438\u0434\u0435\u043a \u043a\u0438\u0440\u0438\u0442\u0438\u043d\u0433.\n\n"
             "<i>Масалан: ABDULLAYEV AZIZBEK</i>"
         ),
         "prompt_birth_date": (
@@ -247,17 +248,13 @@ TEXTS = {
         ),
         "intro_button": "📘 Ознакомиться",
         "terms": (
-            "📜 <b>Согласие с условиями / Фойдаланиш шартлари</b>\n"
-            "━━━━━━━━━━━━━━\n\n"
-            "Нажимая «Согласен», вы подтверждаете, что:\n"
-            "— предоставляете достоверные личные данные\n"
-            "— понимаете, что бот оказывает помощь в процессе подачи заявки через закрытые каналы\n"
-            "— осознаёте, что взаимодействие осуществляется в конфиденциальном формате\n"
-            "— обладаете базовыми знаниями русского языка\n"
-            "— даты интервью и дальнейшие этапы определяются визовыми операторами\n"
-            "— добровольно пользуетесь услугами бота и принимаете все условия\n"
+            "<b>Сезонная работа в Великобритании</b>\n\n"
+            "<b>Добро пожаловать в Телеграм бот регистрации на сезонные работы.</b>\n"
+            "Здесь вы можете подать заявку на участие в Программе сезонных рабочих в Великобритании.\n\n"
+            "Пожалуйста, будьте готовы указать своё имя, фамилию, номер загранпаспорта, электронную почту и номер телефона.\n\n"
+            "<b>Почему нам нужны ваши личные данные и как мы их обрабатываем? Мы являемся администратором ваших личных данных и обрабатывает их в соответствии с Общим регламентом по защите персональных данных (GDPR). Сбор ваших личных данных необходим в связи с вашей кандидатурой на участие в будущих интервью.</b>\n\n"
             "— через данный бот осуществляется связь напрямую с командой координаторов\n"
-            "— регистрация через бот ‼️ПЛАТНАЯ\n\n"
+            "— регистрация через бот <b>‼️ПЛАТНАЯ</b>\n\n"
             "⚠️ <b>Важно:</b>\n"
             "Бот не является государственным органом.\n"
             "Вся информация, полученная в процессе использования бота, должна оставаться конфиденциальной.\n"
@@ -380,33 +377,453 @@ TEXTS = {
 }
 
 NATIONALITIES = {
-    "UZ": "🇺🇿 UZB",
-    "KG": "🇰🇬 KG",
-    "TJ": "🇹🇯 TJ",
+    "UZ": "🇺🇿 Ўзбекистон",
+    "KG": "🇰🇬 Қирғизистон",
+    "TJ": "🇹🇯 Тожикистон",
 }
 
 FORM_STEPS = [
     "nationality",
     "full_name",
     "birth_date",
+    "has_passport",
+    "passport_series",
     "russian_level",
-    "experience",
-    "uk_experience",
-    "phone_primary",
-    "phone_secondary",
+    "english_level",
+    "worked_in_england",
+    "travel_with",
+    "has_higher_education",
+    "has_driver_license",
+    "phone",
     "email",
-    "passport",
+    "interview_consent",
 ]
 
 TEXTS = _normalize_strings(TEXTS)
 NATIONALITIES = _normalize_strings(NATIONALITIES)
 TEXTS["uz"]["language_screen"] = (
-    "\U0001f310 <b>Tilni tanlang</b>\n\n"
-    "Bot keyingi barcha bosqichlarda siz tanlagan tilda ishlaydi."
+    "\U0001f310 <b>Тилни танланг</b>\n\n"
+    "Бот кейинги барча босқичларда сиз танлаган тилда ишлайди."
 )
 TEXTS["ru"]["language_screen"] = (
     "\U0001f310 <b>Выберите язык</b>\n\n"
     "Бот будет работать на выбранном вами языке на всех следующих этапах."
+)
+TEXTS["uz"]["intro"] = (
+    "🇬🇧 <b>Буюк Британияда мавсумий иш</b>\n"
+    "━━━━━━━━━━━━━━\n\n"
+    "Телеграм бот орқали мавсумий ишларга рўйхатдан ўтиш саҳифасига хуш келибсиз.\n\n"
+    "Бу ерда сиз Буюк Британиядаги мавсумий ишчилар дастурида иштирок этиш учун ариза топширишингиз мумкин."
+)
+TEXTS["ru"]["intro"] = (
+    "🇬🇧 <b>Сезонная работа в Великобритании</b>\n"
+    "━━━━━━━━━━━━━━\n\n"
+    "🤖 <b>Что делает этот Telegram бот?</b>\n"
+    "Бот облегчает регистрацию для граждан 🇰🇬 КГ 🇺🇿 УЗБ 🇹🇯 ТДЖ на сезонные работы в 🇬🇧 Великобритании:\n"
+    "заполняет данные и доводит до этапа интервью.\n\n"
+    "🎯 <b>Для кого создан?</b>\n"
+    "❌ Для тех, кто не смог зарегистрироваться самостоятельно\n"
+    "❌ Для тех, кого не приняли\n"
+    "❌ Для тех, кто не понял процесс\n\n"
+    "🤝 <b>Бот открывает возможности кандидатам через закрытые каналы связи с нами.</b>\n\n"
+    "👥 <b>Для кого?</b>\n"
+    "— Для тех, кто хочет ехать работать в Англию\n"
+    "— Для тех, кто устал от попыток\n"
+    "— Для тех, кто готов к результатам\n\n"
+    "💥 <b>Основная идея:</b>\n"
+    "Когда 90% людей не могут зарегистрироваться —\n"
+    "вы легко получите возможность через @seasonalworkUK_bot."
+)
+TEXTS["uz"]["terms"] = (
+    "<b>Буюк Британияда мавсумий иш</b>\n\n"
+    "<b>Телеграм бот орқали мавсумий ишларга рўйхатдан ўтиш саҳифасига хуш келибсиз.</b>\n"
+    "Бу ерда сиз Буюк Британиядаги мавсумий ишчилар дастурида иштирок этиш учун ариза топширишингиз мумкин.\n\n"
+    "Илтимос, ўзингизнинг исмингиз, фамилиянгиз, хорижий паспорт рақамингиз, электрон почта манзилингиз ва телефон рақамингизни киритишга тайёр бўлинг.\n\n"
+    "<b>Нега бизга шахсий маълумотларингиз керак ва улар қандай қайта ишланади? Биз сизнинг шахсий маълумотларингизнинг маъмури ҳисобланамиз ва уларни Шахсий маълумотларни ҳимоя қилиш бўйича умумий регламент (GDPR) талабларига мувофиқ қайта ишлаймиз. Сизнинг шахсий маълумотларингизни йиғиш келгусидаги интервьюларда иштирок этиш учун номзодингизни кўриб чиқиш мақсадида зарур.</b>"
+)
+TEXTS["ru"]["terms"] = (
+    "<b>Сезонная работа в Великобритании</b>\n\n"
+    "<b>Добро пожаловать в Телеграм бот регистрации на сезонные работы.</b>\n"
+    "Здесь вы можете подать заявку на участие в Программе сезонных рабочих в Великобритании.\n\n"
+    "Пожалуйста, будьте готовы указать своё имя, фамилию, номер загранпаспорта, электронную почту и номер телефона.\n\n"
+    "<b>Почему нам нужны ваши личные данные и как мы их обрабатываем? Мы являемся администратором ваших личных данных и обрабатывает их в соответствии с Общим регламентом по защите персональных данных (GDPR). Сбор ваших личных данных необходим в связи с вашей кандидатурой на участие в будущих интервью.</b>"
+)
+
+TEXTS["uz"].update(
+    {
+        "language_screen": (
+            "🌐 <b>Тилни танланг</b>\n\n"
+            "Бот кейинги барча босқичларда сиз танлаган тилда ишлайди."
+        ),
+        "intro": (
+            "🇬🇧 <b>UK Seasonal Work</b>\n"
+            "━━━━━━━━━━━━━━\n\n"
+            "Бот орқали Буюк Британиядаги мавсумий иш учун ариза топшириш жараёнини бошлайсиз."
+        ),
+        "intro_button": "📘 Танишиш",
+        "terms": (
+            "<b>Буюк Британияда мавсумий иш</b>\n\n"
+            "Ариза топширишдан олдин шартлар билан танишинг. Давом этсангиз, маълумотларингизни киритиш босқичи бошланади."
+        ),
+        "agree": "✅ Розиман",
+        "back": "⬅️ Орқага",
+        "change_language": "🌐 Тилни алмаштириш",
+        "go_payment": "💳 Тўловга ўтиш",
+        "application_received": "✅ Маълумотларингиз қабул қилинди.",
+        "payment_ready": "✅ Маълумотларингиз қабул қилинди. Энди тўлов босқичига ўтинг.",
+        "prompt_has_passport": "🛂 <b>4/14 Хорижга чиқиш паспорти борми?</b>",
+        "prompt_passport_series": "🔢 <b>5/14 Паспорт серияси ва рақамини киритинг</b>\n\n<i>Мисол: FA1234567</i>",
+        "prompt_english_level": "🇬🇧 <b>7/14 Инглиз тили даражангизни танланг</b>",
+        "prompt_worked_in_england": "🏗 <b>8/14 Олдин Англияда ишлаганмисиз?</b>",
+        "prompt_travel_with": "👥 <b>9/14 Ким билан бормоқчисиз?</b>",
+        "prompt_has_higher_education": "🎓 <b>10/14 Олий маълумотингиз борми?</b>",
+        "prompt_has_driver_license": "🚗 <b>11/14 Ҳайдовчилик гувоҳномангиз борми?</b>",
+        "prompt_phone": "📱 <b>12/14 Телефон рақамингизни киритинг</b>\n\n<i>Мисол: +998901234567</i>",
+        "prompt_interview_consent": "🎥 <b>14/14 Интервью видео ёзиб олинишига розимисиз?</b>",
+        "invalid_passport_series": "Паспорт серияси нотўғри. Илтимос, <code>FA1234567</code> форматида юборинг.",
+        "level_basic": "🔹 Бошланғич",
+        "level_medium": "🔸 Ўрта",
+        "level_advanced": "⭐ Юқори",
+        "travel_alone": "🙋 Ёлғиз",
+        "travel_spouse": "💑 Турмуш ўртоғим билан",
+        "travel_friend": "🤝 Танишим билан",
+    }
+)
+
+TEXTS["ru"].update(
+    {
+        "language_screen": (
+            "🌐 <b>Выберите язык</b>\n\n"
+            "Бот будет работать на выбранном языке на всех следующих этапах."
+        ),
+        "intro": (
+            "🇬🇧 <b>UK Seasonal Work</b>\n"
+            "━━━━━━━━━━━━━━\n\n"
+            "Через бота вы начинаете подачу заявки на сезонную работу в Великобритании."
+        ),
+        "intro_button": "📘 Ознакомиться",
+        "terms": (
+            "<b>Сезонная работа в Великобритании</b>\n\n"
+            "Перед продолжением ознакомьтесь с условиями. После этого начнется этап заполнения данных."
+        ),
+        "agree": "✅ Согласен / Согласна",
+        "back": "⬅️ Назад",
+        "change_language": "🌐 Сменить язык",
+        "go_payment": "💳 Перейти к оплате",
+        "application_received": "✅ Ваши данные приняты.",
+        "payment_ready": "✅ Ваши данные приняты. Теперь перейдите к оплате.",
+        "prompt_has_passport": "🛂 <b>4/14 Есть ли у вас загранпаспорт?</b>",
+        "prompt_passport_series": "🔢 <b>5/14 Введите серию и номер паспорта</b>\n\n<i>Пример: FA1234567</i>",
+        "prompt_english_level": "🇬🇧 <b>7/14 Выберите уровень английского языка</b>",
+        "prompt_worked_in_england": "🏗 <b>8/14 Работали ли вы раньше в Англии?</b>",
+        "prompt_travel_with": "👥 <b>9/14 С кем вы хотите поехать?</b>",
+        "prompt_has_higher_education": "🎓 <b>10/14 Есть ли у вас высшее образование?</b>",
+        "prompt_has_driver_license": "🚗 <b>11/14 Есть ли у вас водительское удостоверение?</b>",
+        "prompt_phone": "📱 <b>12/14 Введите номер телефона</b>\n\n<i>Пример: +998901234567</i>",
+        "prompt_interview_consent": "🎥 <b>14/14 Вы согласны на видеозапись интервью?</b>",
+        "invalid_passport_series": "Серия паспорта указана неверно. Отправьте в формате <code>FA1234567</code>.",
+        "level_basic": "🔹 Базовый",
+        "level_medium": "🔸 Средний",
+        "level_advanced": "⭐ Продвинутый",
+        "travel_alone": "🙋 Один(а)",
+        "travel_spouse": "💑 С супругом / супругой",
+        "travel_friend": "🤝 Со знакомым",
+    }
+)
+
+TEXTS["uz"].update(
+    {
+        "language_screen": (
+            "🌐 <b>Тилни танланг</b>\n\n"
+            "Бот кейинги барча босқичларда сиз танлаган тилда ишлайди."
+        ),
+        "intro": (
+            "🇬🇧 <b>UK Seasonal Work</b>\n"
+            "━━━━━━━━━━━━━━\n\n"
+            "Бот орқали Буюк Британиядаги мавсумий иш учун ариза топшириш жараёнини бошлайсиз."
+        ),
+        "intro_button": "📘 Танишиш",
+        "terms": (
+            "<b>Буюк Британияда мавсумий иш</b>\n\n"
+            "Ариза топширишдан олдин шартлар билан танишинг. Давом этсангиз, маълумотларингизни киритиш босқичи бошланади."
+        ),
+        "agree": "✅ Розиман",
+        "back": "⬅️ Орқага",
+        "change_language": "🌐 Тилни алмаштириш",
+        "go_payment": "💳 Тўловга ўтиш",
+        "application_received": "✅ Маълумотларингиз қабул қилинди.",
+        "payment_ready": "✅ Маълумотларингиз қабул қилинди. Энди тўлов босқичига ўтинг.",
+        "prompt_has_passport": "🛂 <b>4/14 Хорижга чиқиш паспорти борми?</b>",
+        "prompt_passport_series": "🔢 <b>5/14 Паспорт серияси ва рақамини киритинг</b>\n\n<i>Мисол: FA1234567</i>",
+        "prompt_english_level": "🇬🇧 <b>7/14 Инглиз тили даражангизни танланг</b>",
+        "prompt_worked_in_england": "🏗 <b>8/14 Олдин Англияда ишлаганмисиз?</b>",
+        "prompt_travel_with": "👥 <b>9/14 Ким билан бормоқчисиз?</b>",
+        "prompt_has_higher_education": "🎓 <b>10/14 Олий маълумотингиз борми?</b>",
+        "prompt_has_driver_license": "🚗 <b>11/14 Ҳайдовчилик гувоҳномангиз борми?</b>",
+        "prompt_phone": "📱 <b>12/14 Телефон рақамингизни киритинг</b>\n\n<i>Мисол: +998901234567</i>",
+        "prompt_interview_consent": "🎥 <b>14/14 Интервью видео ёзиб олинишига розимисиз?</b>",
+        "invalid_passport_series": "Паспорт серияси нотўғри. Илтимос, <code>FA1234567</code> форматида юборинг.",
+        "level_basic": "🔹 Бошланғич",
+        "level_medium": "🔸 Ўрта",
+        "level_advanced": "⭐ Юқори",
+        "travel_alone": "🙋 Ёлғиз",
+        "travel_spouse": "💑 Турмуш ўртоғим билан",
+        "travel_friend": "🤝 Танишим билан",
+    }
+)
+
+TEXTS["ru"].update(
+    {
+        "terms": (
+            "<b>Сезонная работа в Великобритании</b>\n\n"
+            "<b>Добро пожаловать в Телеграм бот регистрации на сезонные работы.</b>\n"
+            "Здесь вы можете подать заявку на участие в Программе сезонных рабочих в Великобритании.\n\n"
+            "Пожалуйста, будьте готовы указать своё имя, фамилию, номер загранпаспорта, электронную почту и номер телефона.\n\n"
+            "<b>Почему нам нужны ваши личные данные и как мы их обрабатываем? Мы являемся администратором ваших личных данных и обрабатывает их в соответствии с Общим регламентом по защите персональных данных (GDPR). Сбор ваших личных данных необходим в связи с вашей кандидатурой на участие в будущих интервью.</b>"
+        ),
+        "intro_button": "📘 Ознакомиться",
+        "agree": "✅ Согласен / Согласна",
+    }
+)
+
+TEXTS["uz"].update(
+    {
+        "terms": (
+            "<b>Буюк Британияда мавсумий иш</b>\n\n"
+            "<b>Телеграм бот орқали мавсумий ишларга рўйхатдан ўтиш саҳифасига хуш келибсиз.</b> "
+            "Бу ерда сиз Буюк Британиядаги мавсумий ишчилар дастурида иштирок этиш учун ариза топширишингиз мумкин.\n\n"
+            "Илтимос, ўзингизнинг исмингиз, фамилиянгиз, хорижий паспорт рақамингиз, электрон почта манзилингиз ва телефон рақамингизни киритишга тайёр бўлинг.\n\n"
+            "<b>Нега бизга шахсий маълумотларингиз керак ва улар қандай қайта ишланади? Биз сизнинг шахсий маълумотларингизнинг маъмури ҳисобланамиз ва уларни Шахсий маълумотларни ҳимоя қилиш бўйича умумий регламент (GDPR) талабларига мувофиқ қайта ишлаймиз. Сизнинг шахсий маълумотларингизни йиғиш келгусидаги интервьюларда иштирок этиш учун номзодингизни кўриб чиқиш мақсадида зарур.</b>\n"
+            "— ушбу бот орқали координаторлар жамоаси билан тўғридан-тўғри алоқа амалга оширилишини тушунасиз\n"
+            "— бот орқали рўйхатдан ўтиш <b>‼️ПУЛЛИК</b>\n\n"
+            "<b>⚠️ Муҳим:</b>\n"
+            "Бот давлат органи эмас.\n"
+            "Ботдан фойдаланиш жараёнида олинган барча маълумотлар конфиденциал сақланиши керак.\n"
+            "Конфиденциалликни бузиш сизнинг аризангизни кейинги кўриб чиқишга таъсир қилиши мумкин.\n\n"
+            "✅ Тугмани босиш орқали сиз шартларга розилик билдириб, жараённи давом эттирасиз"
+        ),
+        "payment_title": (
+            "💰 <b>Тўлов учун маълумотлар:</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "💳 <b>Карта рақами:</b> <code>4073420063643757</code>\n"
+            "👤 <b>Эгаси:</b> Hasanov B\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "☑️ Керакли суммани юборинг ва <b>« Тўлов қилдим »</b> тугмасини босинг."
+        ),
+        "payment_details": (
+            "💰 <b>Тўлов учун маълумотлар:</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "💳 <b>Карта рақами:</b> <code>4073420063643757</code>\n"
+            "👤 <b>Эгаси:</b> Hasanov B\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "☑️ Керакли суммани юборинг ва <b>« Тўлов қилдим »</b> тугмасини босинг."
+        ),
+        "payment_done_button": "✅ Тўлов қилдим",
+        "payment_receipt_prompt": (
+            "📎 <b>Квитанцияни юкланг</b>\n\n"
+            "Тўлов чек ёки квитанциясини PDF, расм ёки файл кўринишида юборинг."
+        ),
+        "payment_receipt_pending": "Аввал тўлов қилинг ва « Тўлов қилдим » тугмасини босинг.",
+        "prompt_full_name": (
+            "👤 <b>2/14 Исм ва фамилия</b>\n\n"
+            "Исм ва фамилиянгизни паспортдагидай киритинг.\n\n"
+            "<i>Масалан: ABDULLAYEV AZIZBEK</i>"
+        ),
+    }
+)
+
+TEXTS["ru"].update(
+    {
+        "terms": (
+            "<b>Сезонная работа в Великобритании</b>\n\n"
+            "<b>Добро пожаловать в Телеграм бот регистрации на сезонные работы.</b>\n"
+            "Здесь вы можете подать заявку на участие в Программе сезонных рабочих в Великобритании.\n\n"
+            "Пожалуйста, будьте готовы указать своё имя, фамилию, номер загранпаспорта, электронную почту и номер телефона.\n\n"
+            "<b>Почему нам нужны ваши личные данные и как мы их обрабатываем? Мы являемся администратором ваших личных данных и обрабатывает их в соответствии с Общим регламентом по защите персональных данных (GDPR). Сбор ваших личных данных необходим в связи с вашей кандидатурой на участие в будущих интервью.</b>\n"
+            "— через данный бот осуществляется связь напрямую с командой координаторов\n"
+            "— регистрация через бот <b>‼️ПЛАТНАЯ</b>\n\n"
+            "<b>⚠️ Важно:</b>\n"
+            "Бот не является государственным органом.\n"
+            "Вся информация, полученная в процессе использования бота, должна оставаться конфиденциальной.\n"
+            "Нарушение конфиденциальности может повлиять на дальнейшее рассмотрение вашей заявки.\n\n"
+            "✅ Нажимая кнопку, вы соглашаетесь с условиями и продолжаете процесс"
+        ),
+        "payment_receipt_prompt": (
+            "📎 <b>Загрузите квитанцию</b>\n\n"
+            "Отправьте чек или квитанцию в виде PDF, изображения или файла."
+        ),
+    }
+)
+
+TEXTS["uz"].update(
+    {
+        "agree": "✅ Розиман",
+        "prompt_nationality": (
+            "🪪 <b>1/14 Фуқаролик</b>\n\n"
+            "Қуйидаги давлатлардан бирини танланг:"
+        ),
+        "prompt_full_name": (
+            "👤 <b>2/14 Исм ва фамилия</b>\n\n"
+            "Исм ва фамилиянгизни загранпаспортдагидай киритинг.\n\n"
+            "<i>Масалан: ABDULLAYEV AZIZBEK</i>"
+        ),
+        "prompt_birth_date": (
+            "🎂 <b>3/14 Туғилган сана</b>\n\n"
+            "Туғилган санангизни <b>КК.ОЙ.ЙЙЙЙ</b> форматида киритинг.\n\n"
+            "<i>Масалан: 07.11.1998</i>"
+        ),
+        "prompt_russian_level": (
+            "🗣 <b>6/14 Рус тили даражаси</b>\n\n"
+            "Рус тили даражангизни танланг:"
+        ),
+        "prompt_email": (
+            "✉️ <b>13/14 Email</b>\n\n"
+            "Фаол электрон почта манзилингизни киритинг."
+        ),
+    }
+)
+
+TEXTS["ru"].update(
+    {
+        "agree": "✅ Согласен / Согласна",
+        "prompt_nationality": (
+            "🪪 <b>1/14 Гражданство</b>\n\n"
+            "Выберите одну из стран ниже:"
+        ),
+        "prompt_full_name": (
+            "👤 <b>2/14 Имя и фамилия</b>\n\n"
+            "Введите имя и фамилию точно как в загранпаспорте.\n\n"
+            "<i>Например: ABDULLAYEV AZIZBEK</i>"
+        ),
+        "prompt_birth_date": (
+            "🎂 <b>3/14 Дата рождения</b>\n\n"
+            "Введите дату рождения в формате <b>ДД.ММ.ГГГГ</b>.\n\n"
+            "<i>Например: 07.11.1998</i>"
+        ),
+        "prompt_russian_level": (
+            "🗣 <b>6/14 Уровень русского языка</b>\n\n"
+            "Оцените свой уровень русского языка:"
+        ),
+        "prompt_email": (
+            "✉️ <b>13/14 Email</b>\n\n"
+            "Введите ваш активный адрес электронной почты."
+        ),
+    }
+)
+
+TEXTS["uz"].update(
+    {
+        "language_screen": (
+            "🌐 <b>Тилни танланг</b>\n\n"
+            "Бот кейинги барча босқичларда сиз танлаган тилда ишлайди."
+        ),
+        "intro": (
+            "🇬🇧 <b>Буюк Британияда мавсумий иш</b>\n\n"
+            "Телеграм бот орқали рўйхатдан ўтиш жараёни."
+        ),
+        "intro_button": "📘 Танишиш",
+        "change_language": "🌐 Тилни алмаштириш",
+    }
+)
+
+TEXTS["ru"].update(
+    {
+        "language_screen": (
+            "🌐 <b>Выберите язык</b>\n\n"
+            "Бот будет работать на выбранном языке на всех следующих этапах."
+        ),
+        "intro": (
+            "🇬🇧 <b>Сезонная работа в Великобритании</b>\n\n"
+            "Телеграм бот для регистрации на сезонные работы."
+        ),
+        "intro_button": "📘 Ознакомиться",
+        "change_language": "🌐 Сменить язык",
+    }
+)
+
+TEXTS["uz"].update(
+    {
+        "intro": (
+            "🤖 <b>Бу TelegramBot нима қилади?</b>\n"
+            "Бот 🇰🇬KG 🇺🇿UZB 🇹🇯TJK фуқароларига 🇬🇧Буюк Британиядаги мавсумий ишлар учун рўйхатдан ўтишни осонлаштиради:\n"
+            "маълумотларни тўлдиради ва интервью босқичигача етказади.\n\n"
+            "🎯 <b>Нима учун яратилган?</b>\n"
+            "❌ Ўзи рўйхатдан ўта олмаганлар\n"
+            "❌ Қабулга улгурмаганлар\n"
+            "❌ Жараённи тушунмаганлар учун\n\n"
+            "🤝 Бот биздаги ёпиқ алоқа каналлари орқали номзодга имкониятларни очиб беради.\n\n"
+            "👥 <b>Кимлар учун?</b>\n"
+            "— Англияга ишлашга боришни истаганлар\n"
+            "— Уринишлардан чарчаганлар\n"
+            "— Натижага тайёрлар\n\n"
+            "💥 <b>Асосий ғоя:</b>\n"
+            "90% одамлар рўйхатдан ўта олмаётган пайтда —\n"
+            "сиз @seasonalworkUK_bot орқали осон йўл билан имконият оласиз."
+        )
+    }
+)
+
+TEXTS["ru"].update(
+    {
+        "intro": (
+            "🤖 <b>Что делает бот?</b>\n"
+            "Бот берет на себя весь сложный процесс регистрации на сезонные работы в Англии:\n"
+            "заполняет данные, помогает пройти отбор и доводит кандидата до этапа приглашения на интервью.\n\n"
+            "🎯 <b>Для чего создан бот?</b>\n"
+            "Чтобы дать реальный шанс попасть на сезонную работу тем, кто:\n"
+            "❌ не смог зарегистрироваться сам\n"
+            "❌ не успел попасть в набор\n"
+            "❌ не понимает процесс подачи\n\n"
+            "Бот решает эту проблему и открывает доступ к возможностям, которые недоступны большинству.\n\n"
+            "👥 <b>Кому полезен этот бот?</b>\n"
+            "— Тем, кто реально хочет уехать на работу в Англию 🇬🇧\n"
+            "— Тем, кто устал пытаться зарегистрироваться и получать ошибки\n"
+            "— Тем, кто готов действовать и получить результат\n\n"
+            "💥 <b>Главная идея:</b>\n"
+            "Пока 90% людей не могут даже зарегистрироваться —\n"
+            "ты просто заходишь в бот и получаешь шанс пройти дальше."
+        )
+    }
+)
+
+TEXTS["uz"].update(
+    {
+        "prompt_phone": "📱 <b>12/14 Телефон рақамингизни киритинг</b>\n\n<i>Мисол: 998990010000</i>",
+        "prompt_email": "✉️ <b>13/14 Email манзилингизни киритинг</b>\n\n<i>Мисол: example@gmail.com</i>",
+        "invalid_phone": "Сиз телефон рақамингизни <code>998990010000</code> тартибида киритинг.",
+        "invalid_email": "Сиз email манзилингизни фақат <code>example@gmail.com</code> тартибида киритинг.",
+    }
+)
+
+TEXTS["ru"].update(
+    {
+        "prompt_phone": "📱 <b>12/14 Введите номер телефона</b>\n\n<i>Пример: 998990010000</i>",
+        "prompt_email": "✉️ <b>13/14 Введите email</b>\n\n<i>Пример: example@gmail.com</i>",
+        "invalid_phone": "Пожалуйста, введите номер телефона в формате <code>998990010000</code>.",
+        "invalid_email": "Пожалуйста, введите только Gmail в формате <code>example@gmail.com</code>.",
+    }
+)
+
+TEXTS["uz"].update(
+    {
+        "abandoned_checkout_reminder": (
+            "Salom! 😊\n\n"
+            "Siz jarayonni oxirigacha yetkazmadingiz.\n\n"
+            "Hammasi deyarli tayyor 👇\n"
+            "Faqat to'lovni yakunlasangiz bo'ldi."
+        )
+    }
+)
+
+TEXTS["ru"].update(
+    {
+        "abandoned_checkout_reminder": (
+            "Здравствуйте! 😊\n\n"
+            "Вы не завершили процесс до конца.\n\n"
+            "Почти все уже готово 👇\n"
+            "Осталось только завершить оплату."
+        )
+    }
 )
 
 PAYMENT_METHODS = {
@@ -547,14 +964,50 @@ def set_notice(session: dict[str, Any], message: str | None) -> None:
     session["notice"] = message
 
 
+def persist_session(session: dict[str, Any]) -> None:
+    telegram_user_id = session.get("telegram_user_id")
+    if not telegram_user_id:
+        return
+
+    payload = {
+        "language": session.get("language"),
+        "screen": session.get("screen"),
+        "step": session.get("step"),
+        "data": session.get("data", {}),
+        "lead_id": session.get("lead_id"),
+        "payment_method": session.get("payment_method"),
+        "return_screen": session.get("return_screen"),
+        "return_step": session.get("return_step"),
+    }
+    save_user_session(int(telegram_user_id), json.dumps(payload, ensure_ascii=False))
+
+
 def hydrate_session(user_id: int) -> dict[str, Any]:
     session = get_session(user_id)
-    if session.get("language"):
+    if session.get("language") and session.get("screen") != "language":
         return session
 
     user_row = get_user(user_id)
-    if user_row and user_row.get("language"):
+    if not user_row:
+        return session
+
+    if user_row.get("language"):
         session["language"] = user_row["language"]
+
+    raw_session_state = user_row.get("session_state")
+    if raw_session_state:
+        try:
+            stored_state = json.loads(raw_session_state)
+        except json.JSONDecodeError:
+            stored_state = {}
+        if isinstance(stored_state, dict):
+            session["screen"] = stored_state.get("screen", session["screen"])
+            session["step"] = stored_state.get("step")
+            session["data"] = stored_state.get("data", {})
+            session["lead_id"] = stored_state.get("lead_id")
+            session["payment_method"] = stored_state.get("payment_method")
+            session["return_screen"] = stored_state.get("return_screen", session["return_screen"])
+            session["return_step"] = stored_state.get("return_step")
 
     return session
 
@@ -576,6 +1029,15 @@ def resolve_language(session: dict[str, Any]) -> str:
 
 def text(session: dict[str, Any], key: str) -> str:
     language = resolve_language(session)
+    if key == "language_screen" and language == "uz":
+        return "🌐 <b>Тилни танланг</b>\n\nБот кейинги барча босқичларда сиз танлаган тилда ишлайди."
+    if key == "language_screen" and language == "ru":
+        return "🌐 <b>Выберите язык</b>\n\nБот будет работать на выбранном языке на всех следующих этапах."
+    if key == "language_screen":
+        if language == "uz":
+            return "🌐 <b>Тилни танланг</b>\n\nБот кейинги барча босқичларда сиз танлаган тилда ишлайди."
+        if language == "ru":
+            return "🌐 <b>Выберите язык</b>\n\nБот будет работать на выбранном языке на всех следующих этапах."
     return _fix_mojibake(TEXTS[language][key])
 
 
@@ -692,19 +1154,8 @@ def user_identity_payload(message: Message, session: dict[str, Any], referrer_us
 
 
 def build_language_keyboard(session: dict[str, Any]) -> InlineKeyboardMarkup:
-    if session.get("language") == "ru":
-        first = InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:ru")
-        second = InlineKeyboardButton(text="🇺🇿 Ўзбекча", callback_data="lang:uz")
-    else:
-        first = InlineKeyboardButton(text="🇺🇿 Ўзбекча", callback_data="lang:uz")
-        second = InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:ru")
-
-    return InlineKeyboardMarkup(inline_keyboard=[[first, second]])
-
-
-def build_language_keyboard(session: dict[str, Any]) -> InlineKeyboardMarkup:
     russian_label = "\U0001f1f7\U0001f1fa \u0420\u0443\u0441\u0441\u043a\u0438\u0439"
-    uzbek_label = "\U0001f1fa\U0001f1ff O'zbekcha"
+    uzbek_label = "\U0001f1fa\U0001f1ff \u040e\u0437\u0431\u0435\u043a \u0442\u0438\u043b\u0438"
     if session.get("language") == "ru":
         first = InlineKeyboardButton(text=russian_label, callback_data="lang:ru")
         second = InlineKeyboardButton(text=uzbek_label, callback_data="lang:uz")
@@ -744,41 +1195,61 @@ def build_step_keyboard(session: dict[str, Any]) -> InlineKeyboardMarkup | None:
                 [InlineKeyboardButton(text=text(session, "back"), callback_data="back:terms")],
             ],
         )
+    if step == "has_passport":
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text=text(session, "yes"), callback_data="set:has_passport:yes"),
+                    InlineKeyboardButton(text=text(session, "no"), callback_data="set:has_passport:no"),
+                ],
+                [InlineKeyboardButton(text=text(session, "back"), callback_data="back:step")],
+            ],
+        )
     if step == "russian_level":
         return InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text=str(value), callback_data=f"set:russian_level:{value}") for value in range(0, 3)],
-                [InlineKeyboardButton(text=str(value), callback_data=f"set:russian_level:{value}") for value in range(3, 6)],
+                [InlineKeyboardButton(text=text(session, "level_basic"), callback_data="set:russian_level:basic")],
+                [InlineKeyboardButton(text=text(session, "level_medium"), callback_data="set:russian_level:medium")],
+                [InlineKeyboardButton(text=text(session, "level_advanced"), callback_data="set:russian_level:advanced")],
                 [InlineKeyboardButton(text=text(session, "back"), callback_data="back:step")],
             ],
         )
-    if step == "experience":
+    if step == "english_level":
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=text(session, "level_basic"), callback_data="set:english_level:basic")],
+                [InlineKeyboardButton(text=text(session, "level_medium"), callback_data="set:english_level:medium")],
+                [InlineKeyboardButton(text=text(session, "level_advanced"), callback_data="set:english_level:advanced")],
+                [InlineKeyboardButton(text=text(session, "back"), callback_data="back:step")],
+            ],
+        )
+    if step in {"worked_in_england", "has_higher_education", "has_driver_license"}:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text=text(session, "yes"), callback_data="set:experience:yes"),
-                    InlineKeyboardButton(text=text(session, "no"), callback_data="set:experience:no"),
+                    InlineKeyboardButton(text=text(session, "yes"), callback_data=f"set:{step}:yes"),
+                    InlineKeyboardButton(text=text(session, "no"), callback_data=f"set:{step}:no"),
                 ],
                 [InlineKeyboardButton(text=text(session, "back"), callback_data="back:step")],
             ],
         )
-    if step == "uk_experience":
+    if step == "travel_with":
         return InlineKeyboardMarkup(
             inline_keyboard=[
-                [
-                    InlineKeyboardButton(text=text(session, "yes"), callback_data="set:uk_experience:yes"),
-                    InlineKeyboardButton(text=text(session, "no"), callback_data="set:uk_experience:no"),
-                ],
+                [InlineKeyboardButton(text=text(session, "travel_alone"), callback_data="set:travel_with:alone")],
+                [InlineKeyboardButton(text=text(session, "travel_spouse"), callback_data="set:travel_with:spouse")],
+                [InlineKeyboardButton(text=text(session, "travel_friend"), callback_data="set:travel_with:friend")],
                 [InlineKeyboardButton(text=text(session, "back"), callback_data="back:step")],
             ],
         )
-    if step == "phone_secondary":
+    if step == "interview_consent":
         return InlineKeyboardMarkup(
             inline_keyboard=[
+                [InlineKeyboardButton(text=text(session, "agree"), callback_data="set:interview_consent:true")],
                 [InlineKeyboardButton(text=text(session, "back"), callback_data="back:step")],
             ],
         )
-    if step in {"full_name", "birth_date", "phone_primary", "email", "passport"}:
+    if step in {"full_name", "birth_date", "passport_series", "phone", "email"}:
         return InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text=text(session, "back"), callback_data="back:step")]],
         )
@@ -839,23 +1310,72 @@ def build_completed_keyboard(session: dict[str, Any]) -> InlineKeyboardMarkup:
 def current_screen_content(session: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup | None]:
     screen = session["screen"]
     if screen == "language":
-        return text(session, "language_screen"), build_language_keyboard(session)
+        language = resolve_language(session)
+        if language == "ru":
+            content = (
+                "\U0001f310 <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u044f\u0437\u044b\u043a</b>\n\n"
+                "\u0411\u043e\u0442 \u0431\u0443\u0434\u0435\u0442 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u043d\u0430 "
+                "\u0432\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u043c \u044f\u0437\u044b\u043a\u0435 \u043d\u0430 \u0432\u0441\u0435\u0445 "
+                "\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0445 \u044d\u0442\u0430\u043f\u0430\u0445."
+            )
+        else:
+            content = (
+                "\U0001f310 <b>\u0422\u0438\u043b\u043d\u0438 \u0442\u0430\u043d\u043b\u0430\u043d\u0433</b>\n\n"
+                "\u0411\u043e\u0442 \u043a\u0435\u0439\u0438\u043d\u0433\u0438 \u0431\u0430\u0440\u0447\u0430 \u0431\u043e\u0441\u049b\u0438\u0447\u043b\u0430\u0440\u0434\u0430 "
+                "\u0441\u0438\u0437 \u0442\u0430\u043d\u043b\u0430\u0433\u0430\u043d \u0442\u0438\u043b\u0434\u0430 \u0438\u0448\u043b\u0430\u0439\u0434\u0438."
+            )
+        return content, build_language_keyboard(session)
     if screen == "intro":
         return text(session, "intro"), build_intro_keyboard(session)
     if screen == "terms":
-        return text(session, "terms"), build_terms_keyboard(session)
+        language = resolve_language(session)
+        if language == "ru":
+            content = (
+                "<b>\u0421\u0435\u0437\u043e\u043d\u043d\u0430\u044f \u0440\u0430\u0431\u043e\u0442\u0430 \u0432 \u0412\u0435\u043b\u0438\u043a\u043e\u0431\u0440\u0438\u0442\u0430\u043d\u0438\u0438</b>\n\n"
+                "<b>\u0414\u043e\u0431\u0440\u043e \u043f\u043e\u0436\u0430\u043b\u043e\u0432\u0430\u0442\u044c \u0432 \u0422\u0435\u043b\u0435\u0433\u0440\u0430\u043c \u0431\u043e\u0442 \u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0430\u0446\u0438\u0438 \u043d\u0430 \u0441\u0435\u0437\u043e\u043d\u043d\u044b\u0435 \u0440\u0430\u0431\u043e\u0442\u044b.</b>\n\n"
+                "\u0417\u0434\u0435\u0441\u044c \u0432\u044b \u043c\u043e\u0436\u0435\u0442\u0435 \u043f\u043e\u0434\u0430\u0442\u044c \u0437\u0430\u044f\u0432\u043a\u0443 \u043d\u0430 \u0443\u0447\u0430\u0441\u0442\u0438\u0435 \u0432 \u041f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u0435 \u0441\u0435\u0437\u043e\u043d\u043d\u044b\u0445 \u0440\u0430\u0431\u043e\u0447\u0438\u0445 \u0432 \u0412\u0435\u043b\u0438\u043a\u043e\u0431\u0440\u0438\u0442\u0430\u043d\u0438\u0438.\n\n"
+                "\u041f\u043e\u0436\u0430\u043b\u0443\u0439\u0441\u0442\u0430, \u0431\u0443\u0434\u044c\u0442\u0435 \u0433\u043e\u0442\u043e\u0432\u044b \u0443\u043a\u0430\u0437\u0430\u0442\u044c \u0441\u0432\u043e\u0451 \u0438\u043c\u044f, \u0444\u0430\u043c\u0438\u043b\u0438\u044e, \u043d\u043e\u043c\u0435\u0440 \u0437\u0430\u0433\u0440\u0430\u043d\u043f\u0430\u0441\u043f\u043e\u0440\u0442\u0430, \u044d\u043b\u0435\u043a\u0442\u0440\u043e\u043d\u043d\u0443\u044e \u043f\u043e\u0447\u0442\u0443 \u0438 \u043d\u043e\u043c\u0435\u0440 \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0430.\n\n"
+                "<b>\u041f\u043e\u0447\u0435\u043c\u0443 \u043d\u0430\u043c \u043d\u0443\u0436\u043d\u044b \u0432\u0430\u0448\u0438 \u043b\u0438\u0447\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435 \u0438 \u043a\u0430\u043a \u043c\u044b \u0438\u0445 \u043e\u0431\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u0435\u043c?</b> \u041c\u044b \u044f\u0432\u043b\u044f\u0435\u043c\u0441\u044f \u0430\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440\u043e\u043c \u0432\u0430\u0448\u0438\u0445 \u043b\u0438\u0447\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445 \u0438 \u043e\u0431\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u0435\u043c \u0438\u0445 \u0432 \u0441\u043e\u043e\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0438 \u0441 \u041e\u0431\u0449\u0438\u043c \u0440\u0435\u0433\u043b\u0430\u043c\u0435\u043d\u0442\u043e\u043c \u043f\u043e \u0437\u0430\u0449\u0438\u0442\u0435 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u043b\u044c\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445 (GDPR). \u0421\u0431\u043e\u0440 \u0432\u0430\u0448\u0438\u0445 \u043b\u0438\u0447\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445 \u043d\u0435\u043e\u0431\u0445\u043e\u0434\u0438\u043c \u0432 \u0441\u0432\u044f\u0437\u0438 \u0441 \u0432\u0430\u0448\u0435\u0439 \u043a\u0430\u043d\u0434\u0438\u0434\u0430\u0442\u0443\u0440\u043e\u0439 \u043d\u0430 \u0443\u0447\u0430\u0441\u0442\u0438\u0435 \u0432 \u0431\u0443\u0434\u0443\u0449\u0438\u0445 \u0438\u043d\u0442\u0435\u0440\u0432\u044c\u044e.\n"
+                "\u2014 \u0447\u0435\u0440\u0435\u0437 \u0434\u0430\u043d\u043d\u044b\u0439 \u0431\u043e\u0442 \u043e\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u0441\u0432\u044f\u0437\u044c \u043d\u0430\u043f\u0440\u044f\u043c\u0443\u044e \u0441 \u043a\u043e\u043c\u0430\u043d\u0434\u043e\u0439 \u043a\u043e\u043e\u0440\u0434\u0438\u043d\u0430\u0442\u043e\u0440\u043e\u0432\n"
+                "\u2014 \u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0430\u0446\u0438\u044f \u0447\u0435\u0440\u0435\u0437 \u0431\u043e\u0442 <b>\u203c\ufe0f\u041f\u041b\u0410\u0422\u041d\u0410\u042f</b>\n\n"
+                "<b>\u26a0\ufe0f \u0412\u0430\u0436\u043d\u043e:</b>\n"
+                "\u0411\u043e\u0442 \u043d\u0435 \u044f\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u0433\u043e\u0441\u0443\u0434\u0430\u0440\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u043c \u043e\u0440\u0433\u0430\u043d\u043e\u043c.\n"
+                "\u0412\u0441\u044f \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044f, \u043f\u043e\u043b\u0443\u0447\u0435\u043d\u043d\u0430\u044f \u0432 \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0435 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u044f \u0431\u043e\u0442\u0430, \u0434\u043e\u043b\u0436\u043d\u0430 \u043e\u0441\u0442\u0430\u0432\u0430\u0442\u044c\u0441\u044f \u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e\u0439.\n"
+                "\u041d\u0430\u0440\u0443\u0448\u0435\u043d\u0438\u0435 \u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e\u0441\u0442\u0438 \u043c\u043e\u0436\u0435\u0442 \u043f\u043e\u0432\u043b\u0438\u044f\u0442\u044c \u043d\u0430 \u0434\u0430\u043b\u044c\u043d\u0435\u0439\u0448\u0435\u0435 \u0440\u0430\u0441\u0441\u043c\u043e\u0442\u0440\u0435\u043d\u0438\u0435 \u0432\u0430\u0448\u0435\u0439 \u0437\u0430\u044f\u0432\u043a\u0438.\n\n"
+                "\u2705 \u041d\u0430\u0436\u0438\u043c\u0430\u044f \u043a\u043d\u043e\u043f\u043a\u0443, \u0432\u044b \u0441\u043e\u0433\u043b\u0430\u0448\u0430\u0435\u0442\u0435\u0441\u044c \u0441 \u0443\u0441\u043b\u043e\u0432\u0438\u044f\u043c\u0438 \u0438 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0435\u0442\u0435 \u043f\u0440\u043e\u0446\u0435\u0441\u0441"
+            )
+        else:
+            content = (
+                "<b>\u0411\u0443\u044e\u043a \u0411\u0440\u0438\u0442\u0430\u043d\u0438\u044f\u0434\u0430 \u043c\u0430\u0432\u0441\u0443\u043c\u0438\u0439 \u0438\u0448</b>\n\n"
+                "<b>\u0422\u0435\u043b\u0435\u0433\u0440\u0430\u043c \u0431\u043e\u0442 \u043e\u0440\u049b\u0430\u043b\u0438 \u043c\u0430\u0432\u0441\u0443\u043c\u0438\u0439 \u0438\u0448\u043b\u0430\u0440\u0433\u0430 \u0440\u045e\u0439\u0445\u0430\u0442\u0434\u0430\u043d \u045e\u0442\u0438\u0448 \u0441\u0430\u04b3\u0438\u0444\u0430\u0441\u0438\u0433\u0430 \u0445\u0443\u0448 \u043a\u0435\u043b\u0438\u0431\u0441\u0438\u0437.</b>\n\n"
+                "\u0411\u0443 \u0435\u0440\u0434\u0430 \u0441\u0438\u0437 \u0411\u0443\u044e\u043a \u0411\u0440\u0438\u0442\u0430\u043d\u0438\u044f\u0434\u0430\u0433\u0438 \u043c\u0430\u0432\u0441\u0443\u043c\u0438\u0439 \u0438\u0448\u0447\u0438\u043b\u0430\u0440 \u0434\u0430\u0441\u0442\u0443\u0440\u0438\u0434\u0430 \u0438\u0448\u0442\u0438\u0440\u043e\u043a \u044d\u0442\u0438\u0448 \u0443\u0447\u0443\u043d \u0430\u0440\u0438\u0437\u0430 \u0442\u043e\u043f\u0448\u0438\u0440\u0438\u0448\u0438\u043d\u0433\u0438\u0437 \u043c\u0443\u043c\u043a\u0438\u043d.\n\n"
+                "\u0418\u043b\u0442\u0438\u043c\u043e\u0441, \u045e\u0437\u0438\u043d\u0433\u0438\u0437\u043d\u0438\u043d\u0433 \u0438\u0441\u043c\u0438\u043d\u0433\u0438\u0437, \u0444\u0430\u043c\u0438\u043b\u0438\u044f\u043d\u0433\u0438\u0437, \u0445\u043e\u0440\u0438\u0436\u0438\u0439 \u043f\u0430\u0441\u043f\u043e\u0440\u0442 \u0440\u0430\u049b\u0430\u043c\u0438\u043d\u0433\u0438\u0437, \u044d\u043b\u0435\u043a\u0442\u0440\u043e\u043d \u043f\u043e\u0447\u0442\u0430 \u043c\u0430\u043d\u0437\u0438\u043b\u0438\u043d\u0433\u0438\u0437 \u0432\u0430 \u0442\u0435\u043b\u0435\u0444\u043e\u043d \u0440\u0430\u049b\u0430\u043c\u0438\u043d\u0433\u0438\u0437\u043d\u0438 \u043a\u0438\u0440\u0438\u0442\u0438\u0448\u0433\u0430 \u0442\u0430\u0439\u0451\u0440 \u0431\u045e\u043b\u0438\u043d\u0433.\n\n"
+                "<b>\u041d\u0435\u0433\u0430 \u0431\u0438\u0437\u0433\u0430 \u0448\u0430\u0445\u0441\u0438\u0439 \u043c\u0430\u044a\u043b\u0443\u043c\u043e\u0442\u043b\u0430\u0440\u0438\u043d\u0433\u0438\u0437 \u043a\u0435\u0440\u0430\u043a \u0432\u0430 \u0443\u043b\u0430\u0440 \u049b\u0430\u043d\u0434\u0430\u0439 \u049b\u0430\u0439\u0442\u0430 \u0438\u0448\u043b\u0430\u043d\u0430\u0434\u0438?</b> \u0411\u0438\u0437 \u0441\u0438\u0437\u043d\u0438\u043d\u0433 \u0448\u0430\u0445\u0441\u0438\u0439 \u043c\u0430\u044a\u043b\u0443\u043c\u043e\u0442\u043b\u0430\u0440\u0438\u043d\u0433\u0438\u0437\u043d\u0438\u043d\u0433 \u043c\u0430\u044a\u043c\u0443\u0440\u0438 \u04b3\u0438\u0441\u043e\u0431\u043b\u0430\u043d\u0430\u043c\u0438\u0437 \u0432\u0430 \u0443\u043b\u0430\u0440\u043d\u0438 \u0428\u0430\u0445\u0441\u0438\u0439 \u043c\u0430\u044a\u043b\u0443\u043c\u043e\u0442\u043b\u0430\u0440\u043d\u0438 \u04b3\u0438\u043c\u043e\u044f \u049b\u0438\u043b\u0438\u0448 \u0431\u045e\u0439\u0438\u0447\u0430 \u0443\u043c\u0443\u043c\u0438\u0439 \u0440\u0435\u0433\u043b\u0430\u043c\u0435\u043d\u0442 (GDPR) \u0442\u0430\u043b\u0430\u0431\u043b\u0430\u0440\u0438\u0433\u0430 \u043c\u0443\u0432\u043e\u0444\u0438\u049b \u049b\u0430\u0439\u0442\u0430 \u0438\u0448\u043b\u0430\u0439\u043c\u0438\u0437. \u0421\u0438\u0437\u043d\u0438\u043d\u0433 \u0448\u0430\u0445\u0441\u0438\u0439 \u043c\u0430\u044a\u043b\u0443\u043c\u043e\u0442\u043b\u0430\u0440\u0438\u043d\u0433\u0438\u0437\u043d\u0438 \u0439\u0438\u0493\u0438\u0448 \u043a\u0435\u043b\u0433\u0443\u0441\u0438\u0434\u0430\u0433\u0438 \u0438\u043d\u0442\u0435\u0440\u0432\u044c\u044e\u043b\u0430\u0440\u0434\u0430 \u0438\u0448\u0442\u0438\u0440\u043e\u043a \u044d\u0442\u0438\u0448 \u0443\u0447\u0443\u043d \u043d\u043e\u043c\u0437\u043e\u0434\u0438\u043d\u0433\u0438\u0437\u043d\u0438 \u043a\u045e\u0440\u0438\u0431 \u0447\u0438\u049b\u0438\u0448 \u043c\u0430\u049b\u0441\u0430\u0434\u0438\u0434\u0430 \u0437\u0430\u0440\u0443\u0440.\n"
+                "\u2014 \u0443\u0448\u0431\u0443 \u0431\u043e\u0442 \u043e\u0440\u049b\u0430\u043b\u0438 \u043a\u043e\u043e\u0440\u0434\u0438\u043d\u0430\u0442\u043e\u0440\u043b\u0430\u0440 \u0436\u0430\u043c\u043e\u0430\u0441\u0438 \u0431\u0438\u043b\u0430\u043d \u0442\u045e\u0493\u0440\u0438\u0434\u0430\u043d-\u0442\u045e\u0493\u0440\u0438 \u0430\u043b\u043e\u049b\u0430 \u0430\u043c\u0430\u043b\u0433\u0430 \u043e\u0448\u0438\u0440\u0438\u043b\u0438\u0448\u0438\u043d\u0438 \u0442\u0443\u0448\u0443\u043d\u0430\u0441\u0438\u0437\n"
+                "\u2014 \u0431\u043e\u0442 \u043e\u0440\u049b\u0430\u043b\u0438 \u0440\u045e\u0439\u0445\u0430\u0442\u0434\u0430\u043d \u045e\u0442\u0438\u0448 <b>\u203c\ufe0f\u041f\u0423\u041b\u041b\u0418\u041a</b>\n\n"
+                "<b>\u26a0\ufe0f \u041c\u0443\u04b3\u0438\u043c:</b>\n"
+                "\u0411\u043e\u0442 \u0434\u0430\u0432\u043b\u0430\u0442 \u043e\u0440\u0433\u0430\u043d\u0438 \u044d\u043c\u0430\u0441.\n"
+                "\u0411\u043e\u0442\u0434\u0430\u043d \u0444\u043e\u0439\u0434\u0430\u043b\u0430\u043d\u0438\u0448 \u0436\u0430\u0440\u0430\u0451\u043d\u0438\u0434\u0430 \u043e\u043b\u0438\u043d\u0433\u0430\u043d \u0431\u0430\u0440\u0447\u0430 \u043c\u0430\u044a\u043b\u0443\u043c\u043e\u0442\u043b\u0430\u0440 \u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b \u0441\u0430\u049b\u043b\u0430\u043d\u0438\u0448\u0438 \u043a\u0435\u0440\u0430\u043a.\n"
+                "\u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u043b\u0438\u043a\u043d\u0438 \u0431\u0443\u0437\u0438\u0448 \u0441\u0438\u0437\u043d\u0438\u043d\u0433 \u0430\u0440\u0438\u0437\u0430\u043d\u0433\u0438\u0437\u043d\u0438 \u043a\u0435\u0439\u0438\u043d\u0433\u0438 \u043a\u045e\u0440\u0438\u0431 \u0447\u0438\u049b\u0438\u0448\u0433\u0430 \u0442\u0430\u044a\u0441\u0438\u0440 \u049b\u0438\u043b\u0438\u0448\u0438 \u043c\u0443\u043c\u043a\u0438\u043d.\n\n"
+                "\u2705 \u0422\u0443\u0433\u043c\u0430\u043d\u0438 \u0431\u043e\u0441\u0438\u0448 \u043e\u0440\u049b\u0430\u043b\u0438 \u0441\u0438\u0437 \u0448\u0430\u0440\u0442\u043b\u0430\u0440\u0433\u0430 \u0440\u043e\u0437\u0438\u043b\u0438\u043a \u0431\u0438\u043b\u0434\u0438\u0440\u0438\u0431, \u0436\u0430\u0440\u0430\u0451\u043d\u043d\u0438 \u0434\u0430\u0432\u043e\u043c \u044d\u0442\u0442\u0438\u0440\u0430\u0441\u0438\u0437"
+            )
+        return content, build_terms_keyboard(session)
     if screen == "form":
         prompt_key = {
             "nationality": "prompt_nationality",
             "full_name": "prompt_full_name",
             "birth_date": "prompt_birth_date",
+            "has_passport": "prompt_has_passport",
+            "passport_series": "prompt_passport_series",
             "russian_level": "prompt_russian_level",
-            "experience": "prompt_experience",
-            "uk_experience": "prompt_uk_experience",
-            "phone_primary": "prompt_phone_primary",
-            "phone_secondary": "prompt_phone_secondary",
+            "english_level": "prompt_english_level",
+            "worked_in_england": "prompt_worked_in_england",
+            "travel_with": "prompt_travel_with",
+            "has_higher_education": "prompt_has_higher_education",
+            "has_driver_license": "prompt_has_driver_license",
+            "phone": "prompt_phone",
             "email": "prompt_email",
-            "passport": "prompt_passport",
+            "interview_consent": "prompt_interview_consent",
         }[session["step"]]
         return text(session, prompt_key), build_step_keyboard(session)
     if screen == "payment":
@@ -870,7 +1390,7 @@ def current_screen_content(session: dict[str, Any]) -> tuple[str, InlineKeyboard
         return session.get("cabinet_text") or "", build_cabinet_keyboard(session)
     if screen == "completed":
         return text(session, "application_received"), build_completed_keyboard(session)
-    return text(session, "summary"), build_summary_keyboard(session)
+    return text(session, "payment_ready"), build_summary_keyboard(session)
 
 
 async def delete_message_safe(message: Message) -> None:
@@ -907,9 +1427,9 @@ async def reject_stale_callback(session: dict[str, Any], callback: CallbackQuery
     if not current_message_id or callback.message.message_id == current_message_id:
         return False
 
-    await answer_callback_safe(callback)
-    await delete_message_safe(callback.message)
-    return True
+    # Accept the latest interacted message instead of deleting it as stale.
+    session["bot_message_id"] = callback.message.message_id
+    return False
 
 
 def sync_session_message(session: dict[str, Any], callback: CallbackQuery) -> None:
@@ -928,6 +1448,13 @@ async def clear_tracked_messages(
         if message_id and message_id != keep_message_id:
             await delete_message_by_id_safe(chat_id, message_id, bot)
         session[key] = keep_message_id if key == "bot_message_id" else None
+
+
+async def render_fresh(session: dict[str, Any], chat_id: int, bot: Bot) -> None:
+    await clear_tracked_messages(session, chat_id, bot)
+    session["bot_message_id"] = None
+    session["previous_bot_message_id"] = None
+    await render(session, chat_id, bot)
 
 
 async def render(
@@ -953,12 +1480,14 @@ async def render(
             )
             await clear_tracked_messages(session, chat_id, bot, keep_message_id=message_id)
             session["notice"] = None
+            persist_session(session)
             return
         except TelegramBadRequest as exc:
             error_text = str(exc).lower()
             if "message is not modified" in error_text:
                 await clear_tracked_messages(session, chat_id, bot, keep_message_id=message_id)
                 session["notice"] = None
+                persist_session(session)
                 return
             if "message to edit not found" not in error_text:
                 raise
@@ -968,6 +1497,7 @@ async def render(
     session["bot_message_id"] = sent.message_id
     session["previous_bot_message_id"] = None
     session["notice"] = None
+    persist_session(session)
 
 
 def validate_full_name(value: str) -> bool:
@@ -994,18 +1524,60 @@ def validate_birth_date(value: str) -> bool:
 
 def validate_phone(value: str) -> bool:
     normalized = re.sub(r"[\s\-()]", "", value.strip())
-    return bool(re.fullmatch(r"\+?\d{9,15}", normalized))
+    return bool(re.fullmatch(r"998\d{9}", normalized))
 
 
 def validate_email(value: str) -> bool:
     cleaned = value.strip()
     if ".." in cleaned:
         return False
-    return bool(re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", cleaned))
+    return bool(re.fullmatch(r"[A-Za-z0-9._%+-]+@gmail\.com", cleaned, re.IGNORECASE))
+
+
+def validate_passport_series(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z]{2}\d{7}", value.strip()))
 
 
 def normalize_phone(value: str) -> str:
     return re.sub(r"[\s\-()]", "", value.strip())
+
+
+def normalize_email(value: str) -> str:
+    return value.strip().lower()
+
+
+def lead_payload_from_session(session: dict[str, Any], chat_id: int) -> dict[str, Any]:
+    data = session.get("data", {})
+    return {
+        "user_id": session["telegram_user_id"],
+        "telegram_user_id": session["telegram_user_id"],
+        "telegram_chat_id": chat_id,
+        "language": session["language"],
+        "nationality": data.get("nationality", ""),
+        "full_name": data.get("full_name", ""),
+        "birth_date": data.get("birth_date", ""),
+        "russian_level": data.get("russian_level", ""),
+        "english_level": data.get("english_level"),
+        "has_passport": data.get("has_passport"),
+        "passport_series": data.get("passport_series"),
+        "worked_in_england": data.get("worked_in_england"),
+        "travel_with": data.get("travel_with"),
+        "has_higher_education": data.get("has_higher_education"),
+        "has_driver_license": data.get("has_driver_license"),
+        "phone": data.get("phone"),
+        "phone_primary": data.get("phone", ""),
+        "email": data.get("email", ""),
+        "interview_consent": 1 if data.get("interview_consent") else 0,
+        "payment_status": "pending",
+    }
+
+
+def save_draft_lead(session: dict[str, Any], chat_id: int) -> None:
+    payload = lead_payload_from_session(session, chat_id)
+    if session.get("lead_id"):
+        update_lead(session["lead_id"], payload)
+    else:
+        session["lead_id"] = create_lead(payload)
 
 
 def normalize_email(value: str) -> str:
@@ -1019,7 +1591,7 @@ def previous_state(session: dict[str, Any]) -> None:
         return
     if session["screen"] == "summary":
         session["screen"] = "form"
-        session["step"] = "passport"
+        session["step"] = "interview_consent"
         return
     if session["screen"] != "form" or step is None:
         session["screen"] = "intro"
@@ -1029,7 +1601,10 @@ def previous_state(session: dict[str, Any]) -> None:
         session["step"] = None
         return
     index = FORM_STEPS.index(step)
-    session["step"] = FORM_STEPS[index - 1]
+    previous_step = FORM_STEPS[index - 1]
+    if previous_step == "passport_series" and session.get("data", {}).get("has_passport") != "yes":
+        previous_step = "has_passport"
+    session["step"] = previous_step
 
 
 async def start_handler(message: Message, bot: Bot) -> None:
@@ -1053,33 +1628,39 @@ async def start_handler(message: Message, bot: Bot) -> None:
 
 async def language_handler(callback: CallbackQuery, bot: Bot) -> None:
     session = hydrate_session(callback.from_user.id)
+    if callback.message:
+        session["bot_message_id"] = callback.message.message_id
     if await reject_stale_callback(session, callback, bot):
         return
     sync_session_message(session, callback)
+    selected_language = callback.data.split(":")[1]
     session["telegram_user_id"] = callback.from_user.id
-    session["language"] = callback.data.split(":")[1]
+    session["language"] = selected_language
     session["screen"] = "intro"
     reset_form(session)
     user_row = get_user(callback.from_user.id)
-    if user_row:
-        user_row = ensure_user(
-            {
-                "telegram_user_id": callback.from_user.id,
-                "telegram_chat_id": callback.message.chat.id,
-                "language": session["language"],
-                "username": callback.from_user.username,
-                "first_name": callback.from_user.first_name,
-                "last_name": callback.from_user.last_name,
-                "referrer_user_id": user_row.get("referrer_user_id"),
-            }
-        )
-        session["language"] = user_row.get("language") or session["language"]
+    saved_user = ensure_user(
+        {
+            "telegram_user_id": callback.from_user.id,
+            "telegram_chat_id": callback.message.chat.id,
+            "language": selected_language,
+            "username": callback.from_user.username,
+            "first_name": callback.from_user.first_name,
+            "last_name": callback.from_user.last_name,
+            "referrer_user_id": user_row.get("referrer_user_id") if user_row else None,
+        }
+    )
+    session["language"] = saved_user.get("language") or selected_language
+    session["step"] = None
+    persist_session(session)
     await answer_callback_safe(callback, text(session, "language_changed"))
-    await render(session, callback.message.chat.id, bot, callback.message)
+    await render_fresh(session, callback.message.chat.id, bot)
 
 
 async def navigation_handler(callback: CallbackQuery, bot: Bot) -> None:
     session = hydrate_session(callback.from_user.id)
+    if callback.message:
+        session["bot_message_id"] = callback.message.message_id
     if await reject_stale_callback(session, callback, bot):
         return
     sync_session_message(session, callback)
@@ -1126,51 +1707,83 @@ async def navigation_handler(callback: CallbackQuery, bot: Bot) -> None:
         )
         session["screen"] = "cabinet"
     await answer_callback_safe(callback)
-    await render(session, callback.message.chat.id, bot, callback.message)
+    await render_fresh(session, callback.message.chat.id, bot)
 
 
 async def form_start_handler(callback: CallbackQuery, bot: Bot) -> None:
     session = hydrate_session(callback.from_user.id)
+    if callback.message:
+        session["bot_message_id"] = callback.message.message_id
     if await reject_stale_callback(session, callback, bot):
         return
     sync_session_message(session, callback)
+    reset_form(session)
     session["screen"] = "form"
     session["step"] = "nationality"
-    session["data"] = {}
+    persist_session(session)
     await answer_callback_safe(callback)
-    await render(session, callback.message.chat.id, bot, callback.message)
+    await render_fresh(session, callback.message.chat.id, bot)
 
 
 async def set_value_handler(callback: CallbackQuery, bot: Bot) -> None:
     session = hydrate_session(callback.from_user.id)
+    if callback.message:
+        session["bot_message_id"] = callback.message.message_id
     if await reject_stale_callback(session, callback, bot):
         return
     sync_session_message(session, callback)
     _, field, value = callback.data.split(":", maxsplit=2)
     session["screen"] = "form"
 
+    advanced = True
+
     if field == "nationality":
         session["data"]["nationality"] = value
         session["step"] = "full_name"
+    elif field == "has_passport":
+        session["data"]["has_passport"] = value
+        if value == "yes":
+            session["step"] = "passport_series"
+        else:
+            session["data"]["passport_series"] = None
+            session["step"] = "russian_level"
     elif field == "russian_level":
-        session["data"]["russian_level"] = int(value)
-        session["step"] = "experience"
-    elif field == "experience":
-        session["data"]["experience"] = value
-        session["step"] = "uk_experience"
-    elif field == "uk_experience":
-        session["data"]["uk_experience"] = value
-        session["step"] = "phone_primary"
-    elif field == "phone_secondary":
-        session["data"]["phone_secondary"] = None if value == "skip" else value
-        session["step"] = "email"
+        session["data"]["russian_level"] = value
+        session["step"] = "english_level"
+    elif field == "english_level":
+        session["data"]["english_level"] = value
+        session["step"] = "worked_in_england"
+    elif field == "worked_in_england":
+        session["data"]["worked_in_england"] = value
+        session["step"] = "travel_with"
+    elif field == "travel_with":
+        session["data"]["travel_with"] = value
+        session["step"] = "has_higher_education"
+    elif field == "has_higher_education":
+        session["data"]["has_higher_education"] = value
+        session["step"] = "has_driver_license"
+    elif field == "has_driver_license":
+        session["data"]["has_driver_license"] = value
+        session["step"] = "phone"
+    elif field == "interview_consent":
+        session["data"]["interview_consent"] = True
+        persist_session(session)
+        await finalize_form(session, callback.message.chat.id, bot)
+        await answer_callback_safe(callback)
+        return
+    else:
+        advanced = False
 
-    await answer_callback_safe(callback, text(session, "saved"))
-    await render(session, callback.message.chat.id, bot, callback.message)
+    if advanced:
+        persist_session(session)
+    await answer_callback_safe(callback)
+    await render_fresh(session, callback.message.chat.id, bot)
 
 
 async def back_handler(callback: CallbackQuery, bot: Bot) -> None:
     session = hydrate_session(callback.from_user.id)
+    if callback.message:
+        session["bot_message_id"] = callback.message.message_id
     if await reject_stale_callback(session, callback, bot):
         return
     sync_session_message(session, callback)
@@ -1180,36 +1793,22 @@ async def back_handler(callback: CallbackQuery, bot: Bot) -> None:
         session["step"] = None
     else:
         previous_state(session)
+    persist_session(session)
     await answer_callback_safe(callback)
-    await render(session, callback.message.chat.id, bot, callback.message)
+    await render_fresh(session, callback.message.chat.id, bot)
 
 
 async def finalize_form(session: dict[str, Any], chat_id: int, bot: Bot) -> None:
-    session["lead_id"] = create_lead(
-        {
-            "telegram_user_id": session["telegram_user_id"],
-            "telegram_chat_id": chat_id,
-            "language": session["language"],
-            "nationality": session["data"]["nationality"],
-            "full_name": session["data"]["full_name"],
-            "birth_date": session["data"]["birth_date"],
-            "russian_level": session["data"]["russian_level"],
-            "agriculture_experience": session["data"]["experience"],
-            "uk_seasonal_experience": session["data"]["uk_experience"],
-            "phone_primary": session["data"]["phone_primary"],
-            "phone_secondary": session["data"].get("phone_secondary"),
-            "email": session["data"]["email"],
-            "passport_file_id": session["data"]["passport_file_id"],
-            "passport_kind": session["data"]["passport_kind"],
-        }
-    )
-    session["screen"] = "completed"
+    save_draft_lead(session, chat_id)
+    session["screen"] = "summary"
     session["step"] = None
     await render(session, chat_id, bot)
 
 
 async def payment_handler(callback: CallbackQuery, bot: Bot) -> None:
     session = hydrate_session(callback.from_user.id)
+    if callback.message:
+        session["bot_message_id"] = callback.message.message_id
     if await reject_stale_callback(session, callback, bot):
         return
     sync_session_message(session, callback)
@@ -1220,14 +1819,14 @@ async def payment_handler(callback: CallbackQuery, bot: Bot) -> None:
             update_payment_method(session["lead_id"], method)
         session["payment_method"] = method
         session["screen"] = "payment_upload"
-        await answer_callback_safe(callback)
+        await answer_callback_safe(callback, text(session, "payment_receipt_prompt"))
     else:
         if session.get("lead_id"):
             update_payment_method(session["lead_id"], method)
         session["payment_method"] = method
         session["screen"] = "payment_upload"
         await answer_callback_safe(callback, text(session, "payment_selected"))
-    await render(session, callback.message.chat.id, bot, callback.message)
+    await render_fresh(session, callback.message.chat.id, bot)
 
 
 async def send_receipt_to_admin(
@@ -1400,7 +1999,16 @@ async def process_form_message(message: Message, bot: Bot) -> None:
     step = session["step"]
     value = (message.text or "").strip()
 
-    if step in {"nationality", "russian_level", "experience", "uk_experience", "passport"}:
+    if step in {
+        "has_passport",
+        "russian_level",
+        "english_level",
+        "worked_in_england",
+        "travel_with",
+        "has_higher_education",
+        "has_driver_license",
+        "interview_consent",
+    }:
         set_notice(session, text(session, "select_value"))
         await delete_message_safe(message)
         await render(session, message.chat.id, bot)
@@ -1410,7 +2018,7 @@ async def process_form_message(message: Message, bot: Bot) -> None:
         if not validate_full_name(value):
             set_notice(session, text(session, "invalid_full_name"))
             await delete_message_safe(message)
-            await render(session, message.chat.id, bot)
+            await render_fresh(session, message.chat.id, bot)
             return
         session["data"]["full_name"] = " ".join(value.split())
         session["step"] = "birth_date"
@@ -1418,39 +2026,41 @@ async def process_form_message(message: Message, bot: Bot) -> None:
         if not validate_birth_date(value):
             set_notice(session, text(session, "invalid_birth_date"))
             await delete_message_safe(message)
-            await render(session, message.chat.id, bot)
+            await render_fresh(session, message.chat.id, bot)
             return
         session["data"]["birth_date"] = value
+        session["step"] = "has_passport"
+    elif step == "passport_series":
+        if not validate_passport_series(value):
+            set_notice(session, text(session, "invalid_passport_series"))
+            await delete_message_safe(message)
+            await render_fresh(session, message.chat.id, bot)
+            return
+        session["data"]["passport_series"] = value.upper()
         session["step"] = "russian_level"
-    elif step == "phone_primary":
+    elif step == "phone":
         if not validate_phone(value):
             set_notice(session, text(session, "invalid_phone"))
             await delete_message_safe(message)
-            await render(session, message.chat.id, bot)
+            await render_fresh(session, message.chat.id, bot)
             return
-        session["data"]["phone_primary"] = normalize_phone(value)
-        session["step"] = "phone_secondary"
-    elif step == "phone_secondary":
-        if not validate_phone(value):
-            set_notice(session, text(session, "invalid_phone"))
-            await delete_message_safe(message)
-            await render(session, message.chat.id, bot)
-            return
-        session["data"]["phone_secondary"] = normalize_phone(value)
+        session["data"]["phone"] = normalize_phone(value)
         session["step"] = "email"
     elif step == "email":
         if not validate_email(value):
             set_notice(session, text(session, "invalid_email"))
             await delete_message_safe(message)
-            await render(session, message.chat.id, bot)
+            await render_fresh(session, message.chat.id, bot)
             return
         session["data"]["email"] = normalize_email(value)
-        session["step"] = "passport"
+        save_draft_lead(session, message.chat.id)
+        session["step"] = "interview_consent"
     else:
         return
 
+    persist_session(session)
     await delete_message_safe(message)
-    await render(session, message.chat.id, bot)
+    await render_fresh(session, message.chat.id, bot)
 
 
 def valid_document_name(file_name: str | None, mime_type: str | None) -> bool:
@@ -1468,32 +2078,6 @@ def valid_document_name(file_name: str | None, mime_type: str | None) -> bool:
 
 async def passport_handler(message: Message, bot: Bot) -> None:
     session = hydrate_session(message.from_user.id)
-    if session.get("screen") == "form" and session.get("step") == "passport":
-        is_valid = False
-        file_id = None
-        file_kind = None
-
-        if message.document and valid_document_name(message.document.file_name, message.document.mime_type):
-            is_valid = True
-            file_id = message.document.file_id
-            file_kind = "document"
-        elif message.photo:
-            is_valid = True
-            file_id = message.photo[-1].file_id
-            file_kind = "photo"
-
-        if not is_valid:
-            set_notice(session, text(session, "invalid_passport"))
-            await delete_message_safe(message)
-            await render(session, message.chat.id, bot)
-            return
-
-        session["data"]["passport_file_id"] = file_id
-        session["data"]["passport_kind"] = file_kind
-        await delete_message_safe(message)
-        await finalize_form(session, message.chat.id, bot)
-        return
-
     if (
         session.get("screen") != "payment_upload"
         or not session.get("lead_id")
@@ -1591,6 +2175,34 @@ def should_handle_unknown_message(message: Message) -> bool:
     return not session.get("language")
 
 
+async def process_abandoned_checkout_reminders(bot: Bot) -> None:
+    leads = list_due_abandoned_checkout_leads()
+    for lead in leads:
+        session = get_session(int(lead["telegram_user_id"]))
+        language = lead.get("language")
+        if language in TEXTS:
+            session["language"] = language
+        try:
+            await bot.send_message(
+                chat_id=int(lead["telegram_chat_id"]),
+                text=text(session, "abandoned_checkout_reminder"),
+            )
+            mark_abandoned_checkout_reminded(int(lead["id"]))
+        except Exception:
+            logging.exception("Failed to send abandoned checkout reminder for lead_id=%s", lead.get("id"))
+
+
+async def abandoned_checkout_reminder_loop(bot: Bot) -> None:
+    while True:
+        try:
+            await process_abandoned_checkout_reminders(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("Abandoned checkout reminder loop failed.")
+        await asyncio.sleep(60 * 60)
+
+
 async def main() -> None:
     acquire_instance_lock()
     init_db()
@@ -1622,7 +2234,15 @@ async def main() -> None:
     dp.message.register(process_form_message, F.text)
     dp.message.register(unknown_handler, should_handle_unknown_message)
 
-    await dp.start_polling(bot)
+    reminder_task = asyncio.create_task(abandoned_checkout_reminder_loop(bot))
+    try:
+        await dp.start_polling(bot)
+    finally:
+        reminder_task.cancel()
+        try:
+            await reminder_task
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":

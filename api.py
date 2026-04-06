@@ -63,24 +63,30 @@ class LeadResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    user_id: int | None = None
     telegram_user_id: int
     telegram_chat_id: int
     language: str
-    nationality: str
     full_name: str
     birth_date: str
-    russian_level: int
-    agriculture_experience: str
-    phone_primary: str
-    phone_secondary: str | None
+    has_passport: str | None = None
+    passport_series: str | None = None
+    russian_level: str
+    english_level: str | None = None
+    worked_in_england: str | None = None
+    travel_with: str | None = None
+    has_higher_education: str | None = None
+    has_driver_license: str | None = None
+    phone: str | None = None
+    phone_primary: str | None = None
+    phone_secondary: str | None = None
     email: str
-    passport_file_id: str
-    passport_kind: str
+    interview_consent: int | bool | None = None
     payment_status: str
     payment_method: str | None
     receipt_file_id: str | None
     receipt_kind: str | None
-    passport_open_url: str
+    passport_open_url: str | None
     receipt_open_url: str | None
     created_at: str
 
@@ -206,10 +212,40 @@ def build_admin_file_url(request: Request, file_id: str | None) -> str | None:
     return str(request.url_for("open_telegram_file", file_id=file_id))
 
 
+def normalize_lead_payload(lead: dict) -> dict:
+    payload = dict(lead)
+    for key in (
+        "language",
+        "full_name",
+        "birth_date",
+        "has_passport",
+        "passport_series",
+        "russian_level",
+        "english_level",
+        "worked_in_england",
+        "travel_with",
+        "has_higher_education",
+        "has_driver_license",
+        "phone",
+        "phone_primary",
+        "phone_secondary",
+        "email",
+        "payment_status",
+        "payment_method",
+        "receipt_file_id",
+        "receipt_kind",
+        "created_at",
+    ):
+        value = payload.get(key)
+        if value is not None and not isinstance(value, str):
+            payload[key] = str(value)
+    return payload
+
+
 def serialize_lead(request: Request, lead: dict) -> LeadResponse:
     payload = {
-        **lead,
-        "passport_open_url": build_admin_file_url(request, lead["passport_file_id"]),
+        **normalize_lead_payload(lead),
+        "passport_open_url": build_admin_file_url(request, lead.get("passport_file_id")),
         "receipt_open_url": build_admin_file_url(request, lead.get("receipt_file_id")),
     }
     return LeadResponse.model_validate(payload)
